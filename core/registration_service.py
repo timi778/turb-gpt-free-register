@@ -94,8 +94,11 @@ def _prepare_registration_args() -> tuple[str, str, str]:
     from core.email_provider import acquire_email
     from core.profile_utils import generate_random_birthday
 
-    email = _r.REGISTER_EMAIL
-    name = _r.REGISTER_NAME
+    email = str(getattr(_r, "REGISTER_EMAIL", "") or "").strip()
+    name = str(getattr(_r, "REGISTER_NAME", "") or "").strip()
+    # WebUI/配置里有时会把空值存成 "-"，这不是合法 OpenAI 显示名，按空处理并自动生成
+    if name in {"-", "—", "无", "空", "none", "None", "null", "NULL"}:
+        name = ""
 
     if not email:
         if _e.USE_EMAIL_SERVICE:
