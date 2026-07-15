@@ -72,8 +72,8 @@ def create_app() -> Flask:
         from core.email_provider import parse_email_sources
         pool = {"total": 0, "available": 0, "used": 0, "failed": 0}
         for src in parse_email_sources(_email_cfg.EMAIL_SOURCE):
-            # GPTMail 地址按需生成，不属于本地邮箱池。
-            if src == "gptmail":
+            # GPTMail/MailNest 地址按需生成，不属于本地邮箱池。
+            if src in ("gptmail", "mailnest"):
                 continue
             one = (
                 db.generic_api_email_pool_summary() if src == "generic_api"
@@ -821,7 +821,21 @@ def create_app() -> Flask:
                     "ok": False,
                     "error": "已选择 gptmail 邮箱来源，请填写 GPTMail API Key（配置 → 邮箱 / OTP）。",
                 }), 400
-            # GPTMail 在任务开始时随机生成邮箱，不需要本地邮箱池容量提示。
+        if "mailnest" in sources:
+            api_key = str(getattr(_email_cfg, "MAIL_NEST_API_KEY", "") or "").strip()
+            project_code = str(getattr(_email_cfg, "MAIL_NEST_PROJECT_CODE", "") or "").strip()
+            if not api_key:
+                return jsonify({
+                    "ok": False,
+                    "error": "已选择 mailnest 邮箱来源，请填写 MailNest API Key（配置 → 邮箱 / OTP）。",
+                }), 400
+            if not project_code:
+                return jsonify({
+                    "ok": False,
+                    "error": "已选择 mailnest 邮箱来源，请填写 MailNest 项目代码（配置 → 邮箱 / OTP）。",
+                }), 400
+        if "gptmail" in sources or "mailnest" in sources:
+            # 临时邮箱在任务开始时动态生成，不需要本地邮箱池容量提示。
             warning = ""
         elif "cloudflare_domain" in sources:
             pool = db.domain_email_pool_summary()

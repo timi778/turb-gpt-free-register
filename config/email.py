@@ -14,11 +14,12 @@ from config.env_loader import env_str, apply_env_overrides
 # False: 走人工输入邮箱 + 人工填 OTP 的流程
 USE_EMAIL_SERVICE = False
 
-# 可选值（也可以用英文逗号配置多个，按顺序兜底，例如 "outlook,generic_api"）：
+# 可选值（也可以用英文逗号配置多个，按顺序兜底，例如 "outlook,generic_api,mailnest"）：
 #   "outlook"           — 外购 Outlook 账号池 + mail.chatai.codes 远端取信
 #   "cloudflare_domain" — Cloudflare 域名邮箱（转发到 QQ 邮箱），通过 IMAP 取信
 #   "generic_api"       — 通用 API 取码邮箱池（邮箱----取码地址）
 #   "gptmail"           — GPTMail 临时邮箱 API（运行时随机生成邮箱并自动收码）
+#   "mailnest"          — MailNest/迈巢临时邮箱 API（运行时购买邮箱并自动收码）
 EMAIL_SOURCE = "outlook,generic_api,mailnest"
 
 
@@ -78,18 +79,16 @@ QQ_IMAP_PASSWORD = env_str("QQ_IMAP_PASSWORD", "")
 # 选择 EMAIL_SOURCE="gptmail" 时必填；请在 WebUI「配置 → 邮箱 / OTP」填写。
 GPTMAIL_API_KEY = env_str("GPTMAIL_API_KEY", "")
 
-# ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'EMAIL_SOURCE': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str'})
-
 
 # ============================================================
 # MailNest-迈巢 Outlook 临时邮箱：https://mailnest.top/
 # ============================================================
 
-# 选择 EMAIL_SOURCE="mailnest" 时必填
+# 选择 EMAIL_SOURCE="mailnest" 时必填；请在 WebUI「配置 → 邮箱 / OTP」填写。
 MAIL_NEST_API_KEY = env_str("MAIL_NEST_API_KEY", "")
-# 选择 EMAIL_SOURCE="mailnest" 时必填
-MAIL_NEST_PROJECT_CODE = 'chatgpt001'
+
+# MailNest 项目代码；OpenAI/ChatGPT 默认 chatgpt001。
+MAIL_NEST_PROJECT_CODE = "chatgpt001"
 
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'EMAIL_SOURCE': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str', 'MAIL_NEST_API_KEY': 'str', 'MAIL_NEST_PROJECT_CODE': 'str'})

@@ -9,8 +9,8 @@ from core import email_provider
 class GPTMailProviderTests(unittest.TestCase):
     def test_parse_sources_keeps_gptmail_in_order(self):
         self.assertEqual(
-            email_provider.parse_email_sources("outlook,gptmail,generic_api"),
-            ["outlook", "gptmail", "generic_api"],
+            email_provider.parse_email_sources("outlook,gptmail,generic_api,mailnest"),
+            ["outlook", "gptmail", "generic_api", "mailnest"],
         )
 
     @patch("core.gptmail_client.pick_account")
@@ -37,3 +37,17 @@ class GPTMailProviderTests(unittest.TestCase):
         with patch.object(email_config, "USE_EMAIL_SERVICE", True):
             self.assertEqual(email_provider.wait_for_otp("fresh@gptmail.test", after_ts=123.0), "654321")
         fetch_latest_otp.assert_called_once_with("fresh@gptmail.test", after_ts=123.0)
+
+    @patch("core.mailnest_client.pick_account")
+    def test_acquire_email_uses_mailnest_client(self, pick_account):
+        pick_account.return_value.email = "fresh@mailnest.test"
+
+        with patch("core.email_provider.parse_email_sources", return_value=["mailnest"]):
+            self.assertEqual(email_provider.acquire_email(), "fresh@mailnest.test")
+
+    @patch("core.mailnest_client.fetch_latest_otp", return_value="112233")
+    @patch("core.email_provider.resolve_email_source", return_value="mailnest")
+    def test_wait_for_otp_uses_mailnest_client(self, resolve, fetch_latest_otp):
+        with patch.object(email_config, "USE_EMAIL_SERVICE", True):
+            self.assertEqual(email_provider.wait_for_otp("fresh@mailnest.test", after_ts=123.0), "112233")
+        fetch_latest_otp.assert_called_once_with("fresh@mailnest.test", after_ts=123.0)
