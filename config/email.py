@@ -20,6 +20,7 @@ USE_EMAIL_SERVICE = False
 #   "generic_api"       — 通用 API 取码邮箱池（邮箱----取码地址）
 #   "gptmail"           — GPTMail 临时邮箱 API（运行时随机生成邮箱并自动收码）
 #   "mailnest"          — MailNest/迈巢临时邮箱 API（运行时购买邮箱并自动收码）
+#   "cloudmail"           — CloudMail/Cloud Mail API（从域名列表随机生成邮箱并自动收码）
 EMAIL_SOURCE = "outlook,generic_api,mailnest"
 
 
@@ -90,5 +91,31 @@ MAIL_NEST_API_KEY = env_str("MAIL_NEST_API_KEY", "")
 # MailNest 项目代码；OpenAI/ChatGPT 默认 chatgpt001。
 MAIL_NEST_PROJECT_CODE = "chatgpt001"
 
+# ============================================================
+# CloudMail API 文档：https://doc.skymail.ink/api/api-doc
+# ============================================================
+
+# Cloud Mail Worker/API 地址，例如：https://mail.example.com
+CLOUDMAIL_API_BASE = ""
+
+# CloudMail 管理员邮箱/密码；配置页填写后保存时会自动换取 CLOUDMAIL_AUTH_TOKEN。
+CLOUDMAIL_ADMIN_EMAIL = env_str("CLOUDMAIL_ADMIN_EMAIL", "")
+CLOUDMAIL_PASSWORD = env_str("CLOUDMAIL_PASSWORD", "")
+
+# CloudMail 生成 Token 接口路径；默认按 Cloud Mail 公共 API 风格。
+CLOUDMAIL_TOKEN_PATH = "/api/public/genToken"
+
+# CloudMail/Cloud Mail API Authorization Token；可手动填写，也可由账号密码自动获取。
+CLOUDMAIL_AUTH_TOKEN = env_str("CLOUDMAIL_AUTH_TOKEN", "")
+
+# 邮箱域名列表，每行一个或用英文逗号分隔；获取邮箱时随机生成 local@domain。
+CLOUDMAIL_DOMAINS = []
+
+# 生成邮箱后是否调用 /api/public/addUser 创建邮箱用户。
+CLOUDMAIL_AUTO_ADD_USER = True
+
+# 随机邮箱 local-part 长度。
+CLOUDMAIL_RANDOM_LOCAL_LENGTH = 12
+
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'EMAIL_SOURCE': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str', 'MAIL_NEST_API_KEY': 'str', 'MAIL_NEST_PROJECT_CODE': 'str'})
+apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'EMAIL_SOURCE': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str', 'MAIL_NEST_API_KEY': 'str', 'MAIL_NEST_PROJECT_CODE': 'str', 'CLOUDMAIL_API_BASE': 'str', 'CLOUDMAIL_ADMIN_EMAIL': 'str', 'CLOUDMAIL_PASSWORD': 'str', 'CLOUDMAIL_TOKEN_PATH': 'str', 'CLOUDMAIL_AUTH_TOKEN': 'str', 'CLOUDMAIL_DOMAINS': 'list_str_multiline', 'CLOUDMAIL_AUTO_ADD_USER': 'bool', 'CLOUDMAIL_RANDOM_LOCAL_LENGTH': 'int'})

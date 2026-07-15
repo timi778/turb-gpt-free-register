@@ -8,15 +8,16 @@ EMAIL_SOURCE 支持单个或多个来源：
     "generic_api"
     "gptmail"
     "mailnest"
-    "outlook,generic_api,mailnest"          # 按顺序兜底
-    ["outlook", "generic_api", "mailnest"]  # 也兼容列表写法
+    "cloudmail"
+    "outlook,generic_api,mailnest,cloudmail"          # 按顺序兜底
+    ["outlook", "generic_api", "mailnest", "cloudmail"]  # 也兼容列表写法
 """
 import logging
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-_VALID_SOURCES = ("outlook", "generic_api", "cloudflare_domain", "gptmail", "mailnest")
+_VALID_SOURCES = ("outlook", "generic_api", "cloudflare_domain", "gptmail", "mailnest", "cloudmail")
 
 
 def parse_email_sources(value=None) -> list[str]:
@@ -57,6 +58,9 @@ def _pick_from_source(source: str) -> str:
     if source == "mailnest":
         from core.mailnest_client import pick_account
         return pick_account().email
+    if source == "cloudmail":
+        from core.cloudmail_client import pick_account
+        return pick_account().email
     from core.outlook_client import pick_account
     return pick_account().email
 
@@ -85,6 +89,9 @@ def resolve_email_source(email: str) -> str:
     from core.mailnest_client import get_account_context as get_mailnest_context
     if get_mailnest_context(email):
         return "mailnest"
+    from core.cloudmail_client import get_account_context as get_cloudmail_context
+    if get_cloudmail_context(email):
+        return "cloudmail"
 
     from core import db
     if db.get_generic_api_email_by_email(email):
@@ -141,6 +148,9 @@ def wait_for_otp(email: str, after_ts: float) -> str:
     if source == "mailnest":
         from core.mailnest_client import fetch_latest_otp
         return fetch_latest_otp(email, after_ts=after_ts)
+    if source == "cloudmail":
+        from core.cloudmail_client import fetch_latest_otp
+        return fetch_latest_otp(email, after_ts=after_ts)
     from core.outlook_client import fetch_latest_otp
     return fetch_latest_otp(email, after_ts=after_ts)
 
@@ -159,6 +169,9 @@ def release_email(email: str, status: str = "available", note: str | None = None
         release_account(email, status=status, note=note)
     elif source == "mailnest":
         from core.mailnest_client import release_account
+        release_account(email, status=status, note=note)
+    elif source == "cloudmail":
+        from core.cloudmail_client import release_account
         release_account(email, status=status, note=note)
     else:
         from core.outlook_client import release_account

@@ -200,8 +200,41 @@
     }
     .config-tabs button:hover { background: var(--soft); color: var(--text); }
     .config-tabs button.active { background: var(--blue); border-color: var(--blue); color: #fff; }
-    .config-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px 18px; }
+    .config-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 12px 18px; min-width: 0; }
     .config-panel h3 { grid-column: 1 / -1; margin: 2px 0 0; }
+    .config-subhead {
+      grid-column: 1 / -1; margin-top: 8px; padding: 9px 12px;
+      border-left: 4px solid var(--blue); border-radius: 6px;
+      background: var(--soft); font-size: 13px; font-weight: 900;
+    }
+    .config-subhead .hint { display:block; margin-top:3px; color:var(--muted); font-size:12px; font-weight:400; line-height:1.45; }
+    .config-subtabs {
+      grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap;
+      padding: 8px; border: 1px solid #edf1f5; border-radius: 8px; background: #fbfcfe;
+    }
+    .config-subtabs button {
+      border: 1px solid var(--line); background: #fff; color: #475467;
+      border-radius: 999px; min-height: 30px; padding: 0 12px;
+      cursor: pointer; font-weight: 800; font-size: 12px;
+    }
+    .config-subtabs button:hover { background: var(--soft); color: var(--text); }
+    .config-subtabs button.active { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
+    .config-panel label.fld {
+      min-width: 0; max-width: 100%; overflow: visible;
+      padding: 10px 12px; border: 1px solid #edf1f5; border-radius: 8px; background: #fff;
+    }
+    .config-panel label.fld > input,
+    .config-panel label.fld > select,
+    .config-panel label.fld > textarea {
+      min-width: 0; max-width: 100%;
+    }
+    .config-panel label.fld .hint {
+      line-height: 1.45; white-space: normal; overflow: visible;
+      overflow-wrap: anywhere; word-break: break-word;
+    }
+    .config-panel label.fld .hint .mono {
+      white-space: normal; overflow-wrap: anywhere; word-break: break-all;
+    }
     .config-count { opacity: .72; font-weight: 700; margin-left: 4px; }
     .roxy-workspace-box {
       grid-column: 1 / -1; border: 1px solid #c3d4fb; background: #eef4ff;
@@ -1464,6 +1497,7 @@ $('#codexBody').addEventListener('click', async (e) => {
 
 // ---------- 配置 ----------
 let CONFIG_ACTIVE_GROUP = '';
+let CONFIG_EMAIL_ACTIVE_SECTION = '通用邮箱 / OTP';
 
 function configGroups() {
   const groups = {};
@@ -1489,6 +1523,54 @@ function renderConfigField(f) {
     html += `<input type="${inputType}" data-key="${attrEsc(f.key)}" value="${attrEsc(shown)}" placeholder="${ph}" autocomplete="off" spellcheck="false">`;
   }
   return html + `</label>`;
+}
+
+function configSubhead(title, help = '') {
+  return `<div class="config-subhead">${esc(title)}${help ? `<span class="hint">${esc(help)}</span>` : ''}</div>`;
+}
+
+function emailConfigSectionForKey(key) {
+  if (['USE_EMAIL_SERVICE','REGISTER_EMAIL','REGISTER_NAME','OTP_MAX_WAIT','OTP_POLL_INTERVAL','EMAIL_SOURCE'].includes(key)) {
+    return ['通用邮箱 / OTP', '邮箱来源选择、OTP 等待参数、手动邮箱等通用设置'];
+  }
+  if (key.startsWith('GPTMAIL_')) return ['GPTMail', 'GPTMail 临时邮箱 API 配置'];
+  if (key.startsWith('MAIL_NEST_')) return ['MailNest', 'MailNest / 迈巢临时邮箱 API 配置'];
+  if (key.startsWith('CLOUDMAIL_')) return ['CloudMail', 'CloudMail 域名随机邮箱、Token 和收信 API 配置'];
+  if (key.startsWith('OUTLOOK_')) return ['Outlook 邮箱池', 'Outlook 邮箱池和取件模式配置'];
+  if (['EMAIL_DOMAIN','QQ_EMAIL','QQ_IMAP_PASSWORD'].includes(key)) return ['Cloudflare 域名邮箱', 'Cloudflare 转发到 QQ 邮箱后的 IMAP 收信配置'];
+  return ['其他邮箱配置', ''];
+}
+
+function renderConfigFields(fields) {
+  if (CONFIG_ACTIVE_GROUP !== '邮箱 / OTP') return fields.map(renderConfigField).join('');
+  const bySection = {};
+  for (const f of fields) {
+    const [section, help] = emailConfigSectionForKey(f.key || '');
+    if (!bySection[section]) bySection[section] = {help, fields: []};
+    bySection[section].fields.push(f);
+  }
+  const preferred = ['通用邮箱 / OTP', 'GPTMail', 'MailNest', 'CloudMail', 'Outlook 邮箱池', 'Cloudflare 域名邮箱', '其他邮箱配置'];
+  const sections = preferred.filter(x => bySection[x]).concat(Object.keys(bySection).filter(x => !preferred.includes(x)));
+  if (!sections.includes(CONFIG_EMAIL_ACTIVE_SECTION)) CONFIG_EMAIL_ACTIVE_SECTION = sections[0] || '';
+  let html = `
+    <div class="config-subtabs">
+      ${sections.map(section => `
+        <button type="button" data-email-config-section="${esc(section)}" class="${section === CONFIG_EMAIL_ACTIVE_SECTION ? 'active' : ''}">
+          ${esc(section)} <span class="config-count">${bySection[section].fields.length}</span>
+        </button>
+      `).join('')}
+    </div>
+  `;
+  const current = bySection[CONFIG_EMAIL_ACTIVE_SECTION];
+  if (!current) return html;
+  html += configSubhead(CONFIG_EMAIL_ACTIVE_SECTION, current.help);
+  for (const f of current.fields) {
+    html += renderConfigField(f);
+    if (f.key === 'CLOUDMAIL_AUTH_TOKEN') {
+      html += renderCloudMailTokenTools();
+    }
+  }
+  return html;
 }
 
 function renderConfigTabs() {
@@ -1528,7 +1610,62 @@ function renderRoxyWorkspaceTools() {
   `;
 }
 
+function renderCloudMailTokenTools() {
+  if (CONFIG_ACTIVE_GROUP !== '邮箱 / OTP') return '';
+  const hasCloudMail = CONFIG.some(f => String(f.key || '').startsWith('CLOUDMAIL_'));
+  if (!hasCloudMail) return '';
+  return `
+    <div class="roxy-workspace-box">
+      <div>
+        <b>CloudMail Token</b>
+        <div class="hint">确认本区的 <span class="mono">CLOUDMAIL_API_BASE</span>、管理员邮箱、密码已填写后，点击按钮调用 <span class="mono">/api/public/genToken</span> 生成 Token。保存配置本身不会自动生成 Token。</div>
+      </div>
+      <div class="action-cell">
+        <button class="btn primary" type="button" id="btnGenCloudMailToken">生成 CloudMail Token</button>
+      </div>
+      <div id="cloudMailTokenStatus" class="muted" style="font-size:12px;">未生成</div>
+    </div>
+  `;
+}
+
+function _configValue(key) {
+  const el = $(`#tab-config [data-key="${CSS.escape(key)}"]`);
+  if (el) return el.value;
+  const f = CONFIG.find(x => x.key === key);
+  return f ? (f.value || '') : '';
+}
+
+async function genCloudMailToken() {
+  const btn = $('#btnGenCloudMailToken');
+  const status = $('#cloudMailTokenStatus');
+  if (!btn || !status) return;
+  btn.disabled = true;
+  status.textContent = '正在调用 CloudMail /api/public/genToken...';
+  try {
+    const r = await api('/api/cloudmail/gen-token', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        api_base: _configValue('CLOUDMAIL_API_BASE').trim(),
+        admin_email: _configValue('CLOUDMAIL_ADMIN_EMAIL').trim(),
+        password: _configValue('CLOUDMAIL_PASSWORD').trim(),
+        path: _configValue('CLOUDMAIL_TOKEN_PATH').trim() || '/api/public/genToken',
+      }),
+    });
+    status.innerHTML = `✅ ${esc(r.message || 'Token 已生成并保存')}`;
+    showToast('CloudMail Token 已生成');
+    await loadConfig();
+  } catch(e) {
+    status.innerHTML = `<span style="color:var(--red);">生成失败：${esc(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function bindRoxyWorkspaceTools() {
+  const cloudBtn = $('#btnGenCloudMailToken');
+  if (cloudBtn) cloudBtn.addEventListener('click', genCloudMailToken);
+
   const loadBtn = $('#btnLoadRoxyWorkspaces');
   const saveBtn = $('#btnSaveRoxyWorkspace');
   const sel = $('#roxyWorkspaceSelect');
@@ -1549,7 +1686,7 @@ function renderConfigPanel() {
     <div class="config-panel">
       <h3>${esc(CONFIG_ACTIVE_GROUP)}</h3>
       ${renderRoxyWorkspaceTools()}
-      ${fields.map(renderConfigField).join('')}
+      ${renderConfigFields(fields)}
     </div>
   `;
   bindRoxyWorkspaceTools();
@@ -1571,6 +1708,13 @@ $('#configTabs').addEventListener('click', (e) => {
   if (!btn) return;
   CONFIG_ACTIVE_GROUP = btn.dataset.configGroup;
   renderConfigTabs();
+  renderConfigPanel();
+});
+
+$('#configForm').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-email-config-section]');
+  if (!btn) return;
+  CONFIG_EMAIL_ACTIVE_SECTION = btn.dataset.emailConfigSection;
   renderConfigPanel();
 });
 
@@ -1647,7 +1791,7 @@ $('#btnSaveConfig').addEventListener('click', async () => {
     const r = await api('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({updates}) });
     if (r.reloaded) {
       $('#configBanner').className = 'banner info';
-      $('#configBanner').innerHTML = `✅ 已保存 ${r.updated.length} 项，并完成热加载，<b>立即生效</b>，无需重启。`;
+      $('#configBanner').innerHTML = `✅ 已保存 ${r.updated.length} 项，并完成热加载，<b>立即生效</b>，无需重启。${r.note ? `<br>${esc(r.note)}` : ''}`;
     } else {
       $('#configBanner').className = 'banner warn';
       $('#configBanner').innerHTML = `已保存 ${r.updated.length} 项，但<b>热加载失败</b>（${esc(r.note||'')}），请重启 Web 服务后生效。`;

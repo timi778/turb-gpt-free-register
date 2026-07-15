@@ -234,7 +234,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "EMAIL_SOURCE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
-        "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,cloudflare_domain,gptmail,mailnest",
+        "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,cloudflare_domain,gptmail,mailnest,cloudmail",
     },
     {
         "key": "GPTMAIL_API_KEY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
@@ -266,6 +266,41 @@ EDITABLE_FIELDS = [
     {
         "key": "MAIL_NEST_PROJECT_CODE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
         "label": "MailNest 项目代码", "help": "项目代码 默认 chatgpt001 获取页面 mailnest.top/buy-email",
+    },
+    {
+        "key": "CLOUDMAIL_API_BASE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "CloudMail API 地址", "help": "Cloud Mail Worker/API 地址，例如 https://mail.example.com",
+    },
+    {
+        "key": "CLOUDMAIL_ADMIN_EMAIL", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "CloudMail管理员邮箱", "help": "填写管理员邮箱和密码后保存，会立即调用 /api/public/genToken 获取 CloudMail Token",
+        "storage": "env",
+    },
+    {
+        "key": "CLOUDMAIL_PASSWORD", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "CloudMail 密码", "help": "用于自动获取 Token；保存在 .env",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "CLOUDMAIL_TOKEN_PATH", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "CloudMail Token路径", "help": "固定使用 /api/public/genToken；如部署版本不同可修改",
+    },
+    {
+        "key": "CLOUDMAIL_AUTH_TOKEN", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "CloudMail Token", "help": "CloudMail/Cloud Mail API Authorization Token；保存在 .env",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "CLOUDMAIL_DOMAINS", "file": "email.py", "type": "list_str_multiline", "group": "邮箱 / OTP",
+        "label": "CloudMail 域名列表", "help": "每行一个邮箱域名；获取邮箱时随机生成 local@domain",
+    },
+    {
+        "key": "CLOUDMAIL_AUTO_ADD_USER", "file": "email.py", "type": "bool", "group": "邮箱 / OTP",
+        "label": "CloudMail自动创建用户", "help": "生成随机邮箱后调用 /api/public/addUser 创建用户",
+    },
+    {
+        "key": "CLOUDMAIL_RANDOM_LOCAL_LENGTH", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "CloudMail随机名前缀长度", "help": "生成邮箱 local-part 的长度，建议 10-16",
     },
     # ---- 浏览器地区画像 ----
     {
@@ -664,6 +699,7 @@ def update_config(updates: dict) -> dict:
             continue
         env_updates[key] = _format_env_value(value, field["type"])
         updated.append(key)
+
 
     env_updated = write_env_values(env_updates) if env_updates else []
     if env_updated:
