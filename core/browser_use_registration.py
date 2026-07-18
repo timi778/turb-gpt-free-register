@@ -37,6 +37,22 @@ def _log_timing_enabled() -> bool:
     return bool(getattr(_cfg, "BROWSER_USE_LOG_TIMING", True))
 
 
+def _close_browser_use_session(browser, *, reason: str = "") -> None:
+    """关闭 Browser Use 注册阶段 CDP 会话。
+
+    Codex OAuth 会重新打开自己的干净 session；注册成功后若直接跑 Codex，
+    必须先断开注册阶段的 Browser Use 会话，避免两个远端浏览器 session 同时占用资源。
+    """
+    if browser is None:
+        return
+    label = f"：{reason}" if reason else ""
+    try:
+        logger.info("[BrowserUse] 关闭注册浏览器 session%s", label)
+        browser.close()
+    except Exception as exc:
+        logger.warning("[BrowserUse] 关闭注册浏览器 session 失败%s：%s: %s", label, type(exc).__name__, str(exc)[:180])
+
+
 def _bu_delay(kind: str, seconds: float | None = None) -> None:
     if _fast_mode():
         if seconds is None:
@@ -1498,6 +1514,12 @@ def run_browser_use_registration(
                         "[BrowserUse][Codex] ENABLE_CODEX_AUTO=True，注册成功后自动执行 Codex OAuth：driver=%s",
                         oauth_driver,
                     )
+                    # Codex OAuth 会创建自己的授权 session。先关闭注册阶段的 Browser Use
+                    # CDP 连接，避免注册浏览器继续占用远端会话/代理资源并干扰后续 OAuth。
+                    _close_browser_use_session(browser, reason="即将执行 Codex OAuth")
+                    browser = None
+                    context = None
+                    page = None
                     from core.codex_oauth import run_codex_oauth
                     codex_result = run_codex_oauth(email, otp_provider=wait_for_otp, proxy=proxy, force=True)
                 else:
