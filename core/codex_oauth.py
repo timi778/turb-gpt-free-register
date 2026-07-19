@@ -28,7 +28,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlencode, urlparse, parse_qs
+from urllib.parse import urlencode, urlparse, parse_qs, quote
 
 # 用模块属性方式访问 config，支持 WebUI 热加载（config.reload_all()）。
 # 协议级常量（CLIENT_ID/URL/SCOPE/OUTPUT_DIRNAME）虽然不会改，统一从 _cfg 读，
@@ -232,6 +232,129 @@ def _cpa_request_json(method: str, path: str, body: dict | None = None) -> dict:
         except Exception:
             pass
 
+
+
+def _cpa_request_raw(method: str, path: str, body: dict | None = None, *, response_type: str = "text"):
+    """调用 CPA 管理接口并返回原始响应；用于下载 auth-files 这类非 JSON 响应。"""
+    origin = _cpa_management_origin()
+    key = _cpa_management_key()
+    timeout = int(getattr(_cfg, "CPA_REQUEST_TIMEOUT", 30) or 30)
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}",
+        "X-Management-Key": key,
+    }
+    url = f"{origin}{path}"
+    session = curl_requests.Session()
+    try:
+        resp = session.request(
+            method.upper(),
+            url,
+            headers=headers,
+            data=None if body is None else json.dumps(body),
+            timeout=timeout,
+        )
+        if resp.status_code < 200 or resp.status_code >= 300:
+            msg = ""
+            try:
+                payload = resp.json()
+                if isinstance(payload, dict):
+                    msg = payload.get("error") or payload.get("message") or payload.get("detail") or payload.get("reason") or ""
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"[Codex][CPA] 管理接口失败 {method.upper()} {path} status={resp.status_code}: "
+                f"{msg or (resp.text or '')[:300]}"
+            )
+        if response_type == "bytes":
+            return resp.content
+        return resp.text
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
+def list_cpa_codex_auth_files() -> list[dict]:
+    """读取 CPA auth-files 列表，仅返回 type/name/email 可识别为 codex 的凭证。"""
+    payload = _cpa_request_json("GET", "/v0/management/auth-files")
+    files = payload.get("files") if isinstance(payload.get("files"), list) else []
+    out = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        ftype = str(item.get("type") or "").strip().lower()
+        email = str(item.get("email") or "").strip().lower()
+        if ftype == "codex" or name.lower().startswith("codex-") or "codex" in name.lower():
+            copied = dict(item)
+            copied["name"] = name
+            copied["email"] = email or str(item.get("email") or "")
+            out.append(copied)
+    return out
+
+
+def find_cpa_codex_auth_file(*, email: str = "", local_filename: str = "") -> dict | None:
+    """按本地回执/凭证文件名或邮箱匹配 CPA 侧 codex auth 文件。"""
+    email_l = str(email or "").strip().lower()
+    local_name_l = str(local_filename or "").strip().lower()
+    local_stem_l = local_name_l[:-5] if local_name_l.endswith(".json") else local_name_l
+    files = list_cpa_codex_auth_files()
+    if not files:
+        return None
+
+    def score(item: dict) -> int:
+        name_l = str(item.get("name") or "").lower()
+        item_email_l = str(item.get("email") or "").lower()
+        s = 0
+        if local_name_l and name_l == local_name_l:
+            s = max(s, 100)
+        if local_stem_l and name_l.startswith(local_stem_l):
+            s = max(s, 80)
+        if email_l and item_email_l == email_l:
+            s = max(s, 70)
+        if email_l and email_l in name_l:
+            s = max(s, 60)
+        # 本地 CPA 回执名一般是 codex-邮箱-cpa-callback.json，CPA 实际文件是 codex-邮箱-free.json。
+        if local_stem_l.endswith("-cpa-callback"):
+            base = local_stem_l[:-len("-cpa-callback")]
+            if base and name_l.startswith(base + "-"):
+                s = max(s, 75)
+        return s
+
+    ranked = sorted(((score(item), item) for item in files), key=lambda x: x[0], reverse=True)
+    return ranked[0][1] if ranked and ranked[0][0] > 0 else None
+
+
+def download_cpa_codex_auth_text(*, cpa_name: str | None = None, email: str = "", local_filename: str = "") -> tuple[str, str, dict]:
+    """
+    从 CPA auth-files 下载一个 Codex JSON 文本。
+    Returns: (content_text, download_filename, matched_file_meta)
+    """
+    meta = None
+    name = str(cpa_name or "").strip()
+    if name:
+        for item in list_cpa_codex_auth_files():
+            if str(item.get("name") or "") == name:
+                meta = item
+                break
+    else:
+        meta = find_cpa_codex_auth_file(email=email, local_filename=local_filename)
+        name = str((meta or {}).get("name") or "").strip()
+    if not name:
+        target = email or local_filename or cpa_name or "未知"
+        raise RuntimeError(f"[Codex][CPA] 未在 CPA auth-files 中找到匹配的 Codex 凭证: {target}")
+    text = _cpa_request_raw("GET", f"/v0/management/auth-files/download?name={quote(name, safe='')}", response_type="text")
+    # 下载接口正常应返回 JSON 文本，这里做一次轻校验，避免把 HTML/错误文本当凭证导出。
+    try:
+        parsed = json.loads(text)
+    except Exception as exc:
+        raise RuntimeError(f"[Codex][CPA] CPA 下载内容不是有效 JSON: {name}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"[Codex][CPA] CPA 下载内容不是 JSON 对象: {name}")
+    return json.dumps(parsed, ensure_ascii=False, indent=2) + "\n", name, (meta or {"name": name})
 
 def _first_non_empty(*values) -> str:
     for value in values:

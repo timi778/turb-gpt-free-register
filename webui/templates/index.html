@@ -414,7 +414,8 @@
         <div class="search"><input id="qCodex" placeholder="搜索邮箱、plan、account_id…"></div>
         <div class="buttons">
           <span class="muted" id="codexSelectedHint" style="font-size:12px;align-self:center;margin-right:4px;">已选 0</span>
-          <button class="btn primary" id="btnCodexDownloadBulk" disabled title="把选中的多个凭证打包成一个 JSON 文件下载（备份/迁移用，CPA 不能直接读，需先解包）">批量下载选中</button>
+          <button class="btn primary" id="btnCodexDownloadBulk" disabled title="把选中的多个本地凭证打包成一个 JSON 文件下载（备份/迁移用，CPA 不能直接读，需先解包）">批量下载本地</button>
+          <button class="btn good" id="btnCodexDownloadBulkCpa" disabled title="从 CPA auth-files 下载选中账号的真实 Codex JSON，并打包成 ZIP（可直接解压放入 CPA auth-dir）">批量从CPA下载</button>
           <button class="btn" id="btnCodexDeleteBulk" disabled title="删除选中的本地 Codex JSON 凭证文件">删除选中</button>
         </div>
       </div>
@@ -1694,6 +1695,8 @@ const CODEX_SELECTED = new Set();
 function _codexUpdateSelectedHint() {
   $('#codexSelectedHint').textContent = `已选 ${CODEX_SELECTED.size}`;
   $('#btnCodexDownloadBulk').disabled = CODEX_SELECTED.size === 0;
+  const cpaBulkBtn = $('#btnCodexDownloadBulkCpa');
+  if (cpaBulkBtn) cpaBulkBtn.disabled = CODEX_SELECTED.size === 0;
   const delBtn = $('#btnCodexDeleteBulk');
   if (delBtn) delBtn.disabled = CODEX_SELECTED.size === 0;
 }
@@ -1719,7 +1722,8 @@ function renderCodex() {
       <td class="muted">${esc(r.mtime || '-')}</td>
       <td class="muted">${esc(r.expired || '-')}</td>
       <td class="actions">
-        <button class="primary" data-codex-download="${esc(r.filename)}">下载 JSON</button>
+        <button class="primary" data-codex-download="${esc(r.filename)}" title="下载本地 codex_accounts/ 中的 JSON/回执">本地下载</button>
+        <button class="good" data-codex-download-cpa="${esc(r.filename)}" title="按邮箱从 CPA auth-files 下载真实 Codex JSON">从CPA下载</button>
         ${exported ? `<button data-codex-reset="${esc(r.filename)}" title="重新标记为未导出">重置标记</button>` : ''}
         <button class="danger" data-codex-delete="${esc(r.filename)}" title="删除本地 Codex JSON 凭证文件">删除</button>
       </td>
@@ -1801,6 +1805,46 @@ $('#btnCodexDownloadBulk').addEventListener('click', async () => {
   }
 });
 
+
+$('#btnCodexDownloadBulkCpa').addEventListener('click', async () => {
+  if (CODEX_SELECTED.size === 0) return;
+  const filenames = Array.from(CODEX_SELECTED);
+  const note = `选中 ${filenames.length} 个本地记录，将按邮箱到 CPA auth-files 查找并下载真实 Codex JSON。\n\n` +
+               `下载结果会打包成 ZIP，解压后每个 JSON 可直接放入 CPA auth-dir。\n` +
+               `如 CPA 中找不到对应邮箱，会在 zip 的 manifest.json 记录错误。\n\n继续？`;
+  if (!confirm(note)) return;
+  const btn = $('#btnCodexDownloadBulkCpa');
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/codex/download-bulk-from-cpa', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filenames }),
+    });
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      const detail = Array.isArray(e.errors) && e.errors.length ? ('；' + e.errors.slice(0, 3).map(x => `${x.filename}: ${x.error}`).join('；')) : '';
+      throw new Error((e.error || ('HTTP ' + resp.status)) + detail);
+    }
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const dlname = m ? m[1] : `codex-cpa-bulk-${Date.now()}.zip`;
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = dlname;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 800);
+    showToast(`已从 CPA 打包下载 ${filenames.length} 个（详情见 manifest.json）`);
+    CODEX_SELECTED.clear();
+    setTimeout(loadCodex, 600);
+  } catch(err) {
+    showToast('从 CPA 批量下载失败: ' + err.message);
+  } finally {
+    _codexUpdateSelectedHint();
+  }
+});
+
 $('#btnCodexDeleteBulk').addEventListener('click', async () => {
   if (CODEX_SELECTED.size === 0) return;
   const filenames = Array.from(CODEX_SELECTED);
@@ -1823,6 +1867,33 @@ $('#btnCodexDeleteBulk').addEventListener('click', async () => {
 });
 
 $('#codexBody').addEventListener('click', async (e) => {
+  const dlCpa = e.target.closest('[data-codex-download-cpa]');
+  if (dlCpa) {
+    const fname = dlCpa.dataset.codexDownloadCpa;
+    dlCpa.disabled = true;
+    try {
+      const resp = await fetch(`/api/codex/download-from-cpa/${encodeURIComponent(fname)}`);
+      if (!resp.ok) {
+        const e = await resp.json().catch(() => ({}));
+        throw new Error(e.error || ('HTTP ' + resp.status));
+      }
+      const cd = resp.headers.get('Content-Disposition') || '';
+      const m = cd.match(/filename="([^"]+)"/);
+      const dlname = m ? m[1] : fname.replace(/-cpa-callback\.json$/i, '-free.json');
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = dlname;
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 800);
+      showToast('已从 CPA 下载');
+      setTimeout(loadCodex, 600);
+    } catch(err) {
+      showToast('从 CPA 下载失败: ' + err.message);
+      dlCpa.disabled = false;
+    }
+    return;
+  }
   const dl = e.target.closest('[data-codex-download]');
   if (dl) {
     const fname = dl.dataset.codexDownload;

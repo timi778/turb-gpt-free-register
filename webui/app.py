@@ -563,6 +563,96 @@ def create_app(auth_code: str | None = None) -> Flask:
             headers={"Content-Disposition": f'attachment; filename="{fname}"'},
         )
 
+    @app.get("/api/codex/download-from-cpa/<path:filename>")
+    def api_codex_download_from_cpa(filename: str):
+        """按本地 codex 文件/回执匹配 CPA auth-files，并从 CPA 下载实际 Codex JSON。"""
+        try:
+            content, fname = db.read_codex_credential(filename)
+            import json as _json
+            try:
+                local = _json.loads(content)
+            except Exception:
+                local = {}
+            email = str(local.get("email") or "").strip()
+            from core.codex_oauth import download_cpa_codex_auth_text
+            cpa_text, cpa_name, _meta = download_cpa_codex_auth_text(email=email, local_filename=fname)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 502
+        db.mark_codex_exported(fname)
+        return Response(
+            cpa_text,
+            mimetype="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{cpa_name}"'},
+        )
+
+    @app.post("/api/codex/download-bulk-from-cpa")
+    def api_codex_download_bulk_from_cpa():
+        """
+        批量从 CPA 下载选中的 Codex 凭证，打包成 zip；zip 内每个文件都是 CPA 原始 JSON。
+        Body: {"filenames": ["codex-xxx-cpa-callback.json", ...]}
+        """
+        import io
+        import json as _json
+        import zipfile
+        from datetime import datetime as _dt
+        from core.codex_oauth import download_cpa_codex_auth_text
+
+        data = request.get_json(silent=True) or {}
+        filenames = data.get("filenames") or []
+        if not isinstance(filenames, list) or not filenames:
+            return jsonify({"ok": False, "error": "filenames 必须是非空数组"}), 400
+        if len(filenames) > 1000:
+            return jsonify({"ok": False, "error": "单次最多 1000 个"}), 400
+
+        errors = []
+        added = []
+        used_names = set()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for fname in filenames:
+                if not isinstance(fname, str):
+                    errors.append({"filename": str(fname), "error": "非字符串"})
+                    continue
+                try:
+                    content, real_fname = db.read_codex_credential(fname)
+                    try:
+                        local = _json.loads(content)
+                    except Exception:
+                        local = {}
+                    email = str(local.get("email") or "").strip()
+                    cpa_text, cpa_name, _meta = download_cpa_codex_auth_text(email=email, local_filename=real_fname)
+                    arcname = cpa_name
+                    if arcname in used_names:
+                        stem, dot, ext = arcname.rpartition(".")
+                        arcname = f"{stem or arcname}-{len(used_names)+1}{dot}{ext}" if dot else f"{arcname}-{len(used_names)+1}"
+                    used_names.add(arcname)
+                    zf.writestr(arcname, cpa_text)
+                    added.append({"local_filename": real_fname, "cpa_filename": cpa_name})
+                    db.mark_codex_exported(real_fname)
+                except Exception as exc:
+                    errors.append({"filename": fname, "error": f"{type(exc).__name__}: {exc}"})
+            manifest = {
+                "exported_at": _dt.now().isoformat(timespec="seconds"),
+                "source": "cpa",
+                "count": len(added),
+                "files": added,
+                "errors": errors,
+            }
+            zf.writestr("manifest.json", _json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+        if not added:
+            return jsonify({"ok": False, "error": "没有成功从 CPA 下载任何凭证", "errors": errors}), 502
+        now = _dt.now()
+        dl_name = f"codex-cpa-bulk-{now.strftime('%Y%m%d-%H%M%S')}.zip"
+        buf.seek(0)
+        return Response(
+            buf.getvalue(),
+            mimetype="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{dl_name}"'},
+        )
+
     @app.post("/api/codex/download-bulk")
     def api_codex_download_bulk():
         """
