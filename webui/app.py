@@ -99,6 +99,34 @@ def create_app(auth_code: str | None = None) -> Flask:
         limit = request.args.get("limit", default=500, type=int)
         return jsonify(db.list_accounts(limit=limit))
 
+    @app.get("/api/account-groups")
+    def api_account_groups():
+        """返回注册批次分组，最新分组排在最前，并附带账号数量。"""
+        include_empty = request.args.get("include_empty", default="1") not in ("0", "false", "False")
+        return jsonify(db.list_account_groups(include_empty=include_empty))
+
+    @app.post("/api/account-groups/<int:group_id>/rename")
+    def api_account_group_rename(group_id: int):
+        data = request.get_json(silent=True) or {}
+        name = str(data.get("name") or "").strip()
+        if not name:
+            return jsonify({"ok": False, "error": "分组名称不能为空"}), 400
+        try:
+            group = db.rename_account_group(group_id, name)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        if group is None:
+            return jsonify({"ok": False, "error": "分组不存在"}), 404
+        return jsonify({"ok": True, "group": group})
+
+    @app.post("/api/account-groups/<int:group_id>/delete")
+    def api_account_group_delete(group_id: int):
+        """只删除分组，组内账号保留并转为未分组。"""
+        result = db.delete_account_group(group_id)
+        if result is None:
+            return jsonify({"ok": False, "error": "分组不存在"}), 404
+        return jsonify({"ok": True, **result})
+
     @app.get("/api/accounts/plan-check-status")
     def api_account_plan_check_status():
         """套餐查询轻量状态，不返回 Token、邮箱密码等敏感字段。"""
@@ -1286,7 +1314,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.post("/api/jobs")
     def api_jobs_create():
-        """启动批量注册：body {count, workers}。"""
+        """启动批量注册：body {count, workers, group_name?}。"""
         data = request.get_json(silent=True) or {}
         try:
             count = int(data.get("count", 1))
@@ -1300,6 +1328,18 @@ def create_app(auth_code: str | None = None) -> Flask:
             workers = max(1, min(16, int(data.get("workers", 3))))
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 非法"}), 400
+
+        group_name = " ".join(str(data.get("group_name") or "").strip().split())
+        if len(group_name) > 80:
+            return jsonify({"ok": False, "error": "分组名称最多 80 个字符"}), 400
+
+        def submit_with_optional_group() -> tuple[list[dict], dict | None]:
+            group = db.create_account_group(group_name) if group_name else None
+            kwargs = {"count": count, "workers": workers}
+            if group is not None:
+                kwargs["group_id"] = int(group["id"])
+            jobs = svc.submit_registration(**kwargs)
+            return jobs, group
 
         # 提交前先确认池里有足够可用邮箱，给前端一个温和提示（不阻断）
         from config import email as _email_cfg
@@ -1317,11 +1357,12 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "ok": False,
                     "error": "手动模式建议每次只跑 1 个任务（同一 REGISTER_EMAIL）。请把数量设为 1。",
                 }), 400
-            jobs = svc.submit_registration(count=count, workers=workers)
+            jobs, group = submit_with_optional_group()
             return jsonify({
                 "ok": True,
                 "submitted": len(jobs),
                 "jobs": jobs,
+                "group": group,
                 "warning": f"手动 OTP 模式：将使用 {reg_email}；验证码请在任务页提交",
                 "workers": workers,
             })
@@ -1402,8 +1443,15 @@ def create_app(auth_code: str | None = None) -> Flask:
             warning = ""
             if pool.get("available", 0) < count:
                 warning = f"可用邮箱仅 {pool.get('available', 0)} 个，少于任务数 {count}，不足的会失败"
-        jobs = svc.submit_registration(count=count, workers=workers)
-        return jsonify({"ok": True, "submitted": len(jobs), "jobs": jobs, "warning": warning, "workers": workers})
+        jobs, group = submit_with_optional_group()
+        return jsonify({
+            "ok": True,
+            "submitted": len(jobs),
+            "jobs": jobs,
+            "group": group,
+            "warning": warning,
+            "workers": workers,
+        })
 
     @app.get("/api/manual-otp/waiting")
     def api_manual_otp_waiting():

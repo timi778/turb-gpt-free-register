@@ -6,6 +6,7 @@
     - 用于注册的邮箱.txt      仅保留可继续注册的邮箱素材
     - 注册成功的邮箱.txt      仅保存注册成功的邮箱素材，不追加 token
     - 注册成功的token.txt     每行只保存一个 access token
+    - 注册分组.json            注册批次分组及名称
     - 用于注册的邮箱.json     Outlook 账号池完整状态
     - 注册成功的邮箱.json     注册成功账号完整状态
 """
@@ -33,6 +34,7 @@ _ACCOUNTS_JSON = _PROJECT_ROOT / "注册成功的邮箱.json"
 _ACCOUNTS_TXT = _PROJECT_ROOT / "注册成功的邮箱.txt"
 _TOKENS_TXT = _PROJECT_ROOT / "注册成功的token.txt"
 _JOBS_JSON = _PROJECT_ROOT / "注册任务.json"
+_ACCOUNT_GROUPS_JSON = _PROJECT_ROOT / "注册分组.json"
 _VIEWER_HTML = _PROJECT_ROOT / "accounts_viewer.html"
 _CODEX_DIR = _PROJECT_ROOT / "codex_accounts"
 # 导出状态单独存：{ "codex-邮箱-plan.json": {"exported_at": "...", "exported_count": N} }
@@ -135,6 +137,11 @@ def _sync_tokens_txt(rows: list[dict]) -> None:
 
 
 def _viewer_snapshot(outlook_rows: list[dict], account_rows: list[dict]) -> dict:
+    group_by_id = {
+        int(group.get("id") or 0): group.get("name") or ""
+        for group in _load_account_groups()
+        if int(group.get("id") or 0) > 0
+    }
     account_by_email = {
         (a.get("email") or "").lower(): a
         for a in account_rows
@@ -142,7 +149,7 @@ def _viewer_snapshot(outlook_rows: list[dict], account_rows: list[dict]) -> dict
     return {
         "generated_at": _now(),
         "accounts": [
-            _decorate_account(r)
+            _decorate_account(r, group_by_id)
             for r in sorted(account_rows, key=lambda x: int(x.get("id") or 0), reverse=True)
         ],
         "outlook": [
@@ -509,13 +516,28 @@ def _save_jobs(rows: list[dict]) -> None:
     _write_json(_JOBS_JSON, rows)
 
 
+def _load_account_groups() -> list[dict]:
+    rows = _read_json(_ACCOUNT_GROUPS_JSON, [])
+    return rows if isinstance(rows, list) else []
+
+
+def _save_account_groups(rows: list[dict]) -> None:
+    _write_json(_ACCOUNT_GROUPS_JSON, rows)
+
+
 def _find_by_email(rows: list[dict], email: str) -> dict | None:
     target = (email or "").lower()
     return next((r for r in rows if (r.get("email") or "").lower() == target), None)
 
 
-def _decorate_account(row: dict) -> dict:
+def _decorate_account(row: dict, group_by_id: dict[int, str] | None = None) -> dict:
     out = dict(row)
+    try:
+        group_id = int(out.get("group_id") or 0)
+    except (TypeError, ValueError):
+        group_id = 0
+    out["group_id"] = group_id or None
+    out["group_name"] = (group_by_id or {}).get(group_id, "") if group_id else ""
     out["note"] = out.get("note") or ""
     out["note_updated_at"] = out.get("note_updated_at") or ""
     plan_status = out.get("plan_check_status")
@@ -590,6 +612,140 @@ def _row_to_dict(row: dict | None) -> dict | None:
 # ============================================================
 # registered_accounts
 # ============================================================
+
+def _clean_account_group_name(name: str | None) -> str:
+    text = " ".join(str(name or "").strip().split())
+    if not text:
+        text = datetime.now().strftime("%Y-%m-%d %H:%M")
+    if len(text) > 80:
+        raise ValueError("分组名称最多 80 个字符")
+    return text
+
+
+def create_account_group(name: str | None = None) -> dict:
+    """创建一个注册批次分组；重名时自动追加序号，确保每批可独立筛选。"""
+    with _LOCK:
+        rows = _load_account_groups()
+        base_name = _clean_account_group_name(name)
+        used_names = {(row.get("name") or "").strip().casefold() for row in rows}
+        final_name = base_name
+        suffix = 2
+        while final_name.casefold() in used_names:
+            final_name = f"{base_name} ({suffix})"
+            suffix += 1
+        now = _now()
+        row = {
+            "id": _next_id(rows),
+            "name": final_name,
+            "created_at": now,
+            "updated_at": now,
+        }
+        rows.append(row)
+        _save_account_groups(rows)
+        return dict(row)
+
+
+def list_account_groups(include_empty: bool = True) -> list[dict]:
+    """按最新创建时间返回账号分组，并附带当前账号数量。"""
+    with _LOCK:
+        rows = _load_account_groups()
+        counts: dict[int, int] = {}
+        for account in _load_accounts():
+            try:
+                group_id = int(account.get("group_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if group_id > 0:
+                counts[group_id] = counts.get(group_id, 0) + 1
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                group_id = int(item.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            item["id"] = group_id
+            item["account_count"] = counts.get(group_id, 0)
+            if include_empty or item["account_count"] > 0:
+                result.append(item)
+        result.sort(key=lambda item: (str(item.get("created_at") or ""), int(item.get("id") or 0)), reverse=True)
+        return result
+
+
+def get_account_group(group_id: int) -> dict | None:
+    with _LOCK:
+        row = next((item for item in _load_account_groups() if int(item.get("id") or 0) == int(group_id)), None)
+        return dict(row) if row else None
+
+
+def rename_account_group(group_id: int, name: str) -> dict | None:
+    """修改分组名称；名称不允许与其他分组重复。"""
+    with _LOCK:
+        rows = _load_account_groups()
+        row = next((item for item in rows if int(item.get("id") or 0) == int(group_id)), None)
+        if row is None:
+            return None
+        final_name = _clean_account_group_name(name)
+        duplicate = next((
+            item for item in rows
+            if int(item.get("id") or 0) != int(group_id)
+            and (item.get("name") or "").strip().casefold() == final_name.casefold()
+        ), None)
+        if duplicate is not None:
+            raise ValueError("分组名称已存在")
+        row["name"] = final_name
+        row["updated_at"] = _now()
+        _save_account_groups(rows)
+        return dict(row)
+
+
+def delete_account_group(group_id: int) -> dict | None:
+    """删除分组但保留账号；原分组账号与任务会变为未分组。"""
+    with _LOCK:
+        groups = _load_account_groups()
+        target = next((item for item in groups if int(item.get("id") or 0) == int(group_id)), None)
+        if target is None:
+            return None
+
+        accounts = _load_accounts()
+        jobs = _load_jobs()
+        detached_accounts = 0
+        detached_jobs = 0
+        for account in accounts:
+            if int(account.get("group_id") or 0) == int(group_id):
+                account["group_id"] = None
+                account["updated_at"] = _now()
+                detached_accounts += 1
+        for job in jobs:
+            if int(job.get("group_id") or 0) == int(group_id):
+                job["group_id"] = None
+                detached_jobs += 1
+
+        _save_account_groups([item for item in groups if int(item.get("id") or 0) != int(group_id)])
+        if detached_accounts:
+            _save_accounts(accounts)
+        if detached_jobs:
+            _save_jobs(jobs)
+        return {
+            "group": dict(target),
+            "detached_accounts": detached_accounts,
+            "detached_jobs": detached_jobs,
+        }
+
+
+def assign_account_group(acc_id: int, group_id: int) -> bool:
+    """把注册成功账号归入指定批次分组。"""
+    with _LOCK:
+        if not any(int(item.get("id") or 0) == int(group_id) for item in _load_account_groups()):
+            return False
+        accounts = _load_accounts()
+        row = next((item for item in accounts if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        row["group_id"] = int(group_id)
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
 
 def insert_account(
     *,
@@ -946,7 +1102,7 @@ def recover_interrupted_extract_links() -> int:
 def list_account_plan_check_statuses(limit: int = 5000) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
-        "id", "email", "updated_at", "plan_type", "current_plan_type",
+        "id", "email", "updated_at", "group_id", "group_name", "plan_type", "current_plan_type",
         "plan_check_status", "plan_check_trigger", "plan_check_queued_at",
         "plan_check_started_at", "plan_check_completed_at", "plan_check_ok",
         "plan_check_error", "plan_checked_at", "plan_last_success_at",
@@ -961,9 +1117,14 @@ def list_account_plan_check_statuses(limit: int = 5000) -> dict:
     )
     with _LOCK:
         rows = sorted(_load_accounts(), key=lambda x: int(x.get("id") or 0), reverse=True)[:max(1, int(limit))]
+        group_by_id = {
+            int(group.get("id") or 0): group.get("name") or ""
+            for group in _load_account_groups()
+            if int(group.get("id") or 0) > 0
+        }
         items = []
         for row in rows:
-            decorated = _decorate_account(row)
+            decorated = _decorate_account(row, group_by_id)
             items.append({key: decorated.get(key) for key in fields})
         latest = max((str(row.get("updated_at") or "") for row in rows), default="")
         return {"items": items, "revision": f"{len(rows)}:{latest}"}
@@ -972,19 +1133,34 @@ def list_account_plan_check_statuses(limit: int = 5000) -> dict:
 def list_accounts(limit: int = 500, offset: int = 0) -> list[dict]:
     with _LOCK:
         rows = sorted(_load_accounts(), key=lambda x: int(x.get("id") or 0), reverse=True)
-        return [_decorate_account(r) for r in rows[offset: offset + limit]]
+        group_by_id = {
+            int(group.get("id") or 0): group.get("name") or ""
+            for group in _load_account_groups()
+            if int(group.get("id") or 0) > 0
+        }
+        return [_decorate_account(r, group_by_id) for r in rows[offset: offset + limit]]
 
 
 def get_account(acc_id: int) -> dict | None:
     with _LOCK:
         row = next((r for r in _load_accounts() if int(r.get("id") or 0) == int(acc_id)), None)
-        return _decorate_account(row) if row else None
+        group_by_id = {
+            int(group.get("id") or 0): group.get("name") or ""
+            for group in _load_account_groups()
+            if int(group.get("id") or 0) > 0
+        }
+        return _decorate_account(row, group_by_id) if row else None
 
 
 def get_account_by_email(email: str) -> dict | None:
     with _LOCK:
         row = _find_by_email(_load_accounts(), email)
-        return _decorate_account(row) if row else None
+        group_by_id = {
+            int(group.get("id") or 0): group.get("name") or ""
+            for group in _load_account_groups()
+            if int(group.get("id") or 0) > 0
+        }
+        return _decorate_account(row, group_by_id) if row else None
 
 
 def update_account_note(acc_id: int, note: str) -> bool:
@@ -1631,6 +1807,7 @@ def _new_job_row(
     retry_action: str | None = None,
     email: str | None = None,
     account_id: int | None = None,
+    group_id: int | None = None,
 ) -> dict:
     job_uuid = str(uuid.uuid4())
     log_file = str(_LOG_DIR / f"{job_uuid}.log")
@@ -1651,15 +1828,16 @@ def _new_job_row(
         "started_at": None,
         "completed_at": None,
         "account_id": account_id,
+        "group_id": int(group_id) if group_id is not None else None,
         "created_at": _now(),
     }
 
 
-def create_job(email_source: str) -> dict:
+def create_job(email_source: str, group_id: int | None = None) -> dict:
     """创建一个首次执行的 pending 注册任务。"""
     with _LOCK:
         rows = _load_jobs()
-        row = _new_job_row(rows, email_source=email_source)
+        row = _new_job_row(rows, email_source=email_source, group_id=group_id)
         rows.append(row)
         _save_jobs(rows)
         return dict(row)
@@ -1710,6 +1888,7 @@ def create_retry_job(
             retry_action=("codex" if job_type == "codex_retry" else "registration"),
             email=email,
             account_id=account_id,
+            group_id=source.get("group_id"),
         )
         rows.append(row)
         _save_jobs(rows)

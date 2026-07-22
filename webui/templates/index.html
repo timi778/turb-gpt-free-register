@@ -99,6 +99,18 @@
     .toolbar { padding: 14px 16px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; }
     .search { flex: 1; min-width: min(420px, 100%); }
     .search input { margin-top: 0; }
+    .account-search { display: grid; gap: 8px; align-self: stretch; }
+    .account-group-tabs {
+      display: flex; gap: 7px; align-items: center; max-width: 100%; overflow-x: auto;
+      padding: 1px 0 3px; scrollbar-width: thin;
+    }
+    .account-group-tabs button {
+      flex: 0 0 auto; min-height: 30px; border: 1px solid var(--line); border-radius: 999px;
+      background: #fff; color: #475467; padding: 0 12px; font: inherit; font-size: 12px;
+      font-weight: 800; cursor: pointer; white-space: nowrap;
+    }
+    .account-group-tabs button:hover { background: var(--soft); color: var(--text); }
+    .account-group-tabs button.active { background: var(--blue); border-color: var(--blue); color: #fff; }
     .buttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .inline-num { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; font-weight:700; white-space:nowrap; }
     .inline-num input { width:70px; min-height:38px; margin-top:0; padding:4px 8px; }
@@ -180,8 +192,8 @@
       width: 100%; max-width: 100%; min-width: 0;
       max-height: 320px; overflow: auto; line-height: 1.5;
     }
-    #logPanel, #retryLogPanel, #qrPanel { min-width: 0; max-width: 100%; overflow-x: hidden; }
-    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #qrPanel:not(.hidden) {
+    #logPanel, #retryLogPanel, #qrPanel, #groupManagerPanel { min-width: 0; max-width: 100%; overflow-x: hidden; }
+    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #qrPanel:not(.hidden), #groupManagerPanel:not(.hidden) {
       position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
       z-index: 1000; display: block; width: min(1100px, calc(100vw - 48px));
       max-height: min(760px, calc(100vh - 48px)); overflow: hidden;
@@ -189,11 +201,26 @@
       background: var(--surface); box-shadow: 0 0 0 9999px rgba(15,23,42,.45), 0 24px 70px rgba(15,23,42,.34);
     }
     #qrPanel:not(.hidden) { width: min(520px, calc(100vw - 48px)); text-align: center; }
-    #logPanel h3, #retryLogPanel h3, #qrPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-    #logPanel h3 .btn, #retryLogPanel h3 .btn, #qrPanel h3 .btn { margin-left:auto; float:none !important; }
+    #groupManagerPanel:not(.hidden) { width: min(760px, calc(100vw - 48px)); }
+    #logPanel h3, #retryLogPanel h3, #qrPanel h3, #groupManagerPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+    #logPanel h3 .btn, #retryLogPanel h3 .btn, #qrPanel h3 .btn, #groupManagerPanel h3 .btn { margin-left:auto; float:none !important; }
     #logPanel .log, #retryLogPanel .log { max-height: calc(min(760px, calc(100vh - 48px)) - 74px); margin-top:0; }
     #qrPanel img { display:block; max-width:min(360px, calc(100vw - 96px)); max-height:420px; margin:12px auto; border:1px solid var(--line); border-radius:10px; background:#fff; }
     #qrPanel .qr-link { display:block; word-break:break-all; white-space:normal; font-size:12px; color:var(--muted); margin-top:8px; }
+    .group-manager-list { display: grid; gap: 8px; max-height: min(560px, calc(100vh - 190px)); overflow: auto; margin-top: 12px; }
+    .group-manager-row {
+      display: flex; gap: 12px; align-items: center; justify-content: space-between;
+      padding: 11px 12px; border: 1px solid #edf1f5; border-radius: 8px; background: #fbfcfe;
+    }
+    .group-manager-main { min-width: 0; }
+    .group-manager-name { font-weight: 800; overflow-wrap: anywhere; }
+    .group-manager-meta { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .group-manager-actions { flex: 0 0 auto; display: flex; gap: 7px; }
+    .group-manager-actions button {
+      min-height: 30px; border: 1px solid var(--line); border-radius: 6px; background: #fff;
+      padding: 0 10px; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer;
+    }
+    .group-manager-actions button.danger { border-color: #e7a3a0; color: #b3261e; }
     .hidden { display: none !important; }
     #toast {
       position: fixed; right: 18px; bottom: 18px; padding: 10px 14px; border-radius: 8px;
@@ -321,6 +348,12 @@
               <input id="regCount" type="number" min="1" max="200" value="1">
             </label>
           </div>
+          <div style="flex:2;min-width:240px;">
+            <label class="fld">账号分组
+              <input id="regGroup" type="text" maxlength="80" placeholder="默认使用当前时间，精确到分钟">
+              <span class="hint">本次成功注册的账号会统一归入该分组，可自行修改名称。</span>
+            </label>
+          </div>
           <div>
             <label class="fld">并发线程数
               <input id="regWorkers" type="number" min="1" max="16" value="3">
@@ -368,7 +401,10 @@
   <div id="tab-accounts" class="hidden">
     <section class="card">
       <div class="toolbar">
-        <div class="search"><input id="qAccounts" placeholder="搜索邮箱、token、来源…"></div>
+        <div class="search account-search">
+          <input id="qAccounts" placeholder="搜索邮箱、token、来源…">
+          <div class="account-group-tabs" id="accountGroupTabs"><button type="button" class="active" data-account-group-id="all">全部账号</button></div>
+        </div>
         <div class="buttons">
           <span class="muted" id="accountsSelectedHint" style="font-size:12px;align-self:center;margin-right:4px;">已选 0</span>
           <label class="inline-num" title="批量补跑 Codex 的并发线程数">补跑线程
@@ -383,6 +419,7 @@
           <button class="btn good" id="btnCopySelectedLines" disabled title="复制选中账号的完整整行，每个账号一行">复制选中整行</button>
           <button class="btn good" id="btnDownloadSelectedTxt" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载选中TXT</button>
           <button class="btn" id="btnDeleteSelectedAccounts" disabled title="删除选中的本地账号/token记录">删除选中</button>
+          <button class="btn" id="btnManageGroups" title="编辑或删除注册批次分组；删除分组不会删除账号">管理分组</button>
           <button class="btn primary" id="copyAllTokens">复制全部 Token</button>
           <button class="btn good" id="copyAllLines">复制全部整行</button>
         </div>
@@ -536,6 +573,11 @@
   <img id="qrImage" alt="支付二维码">
   <a id="qrOpenLink" class="qr-link" href="#" target="_blank" rel="noopener noreferrer"></a>
 </div>
+<div id="groupManagerPanel" class="body hidden">
+  <h3>管理账号分组 <button class="btn" id="btnCloseGroupManager">关闭</button></h3>
+  <p class="muted" style="font-size:12px;line-height:1.5;">可修改分组名称或删除分组。删除分组只会让其中账号变为未分组，不会删除账号、Token 或注册任务。</p>
+  <div class="group-manager-list" id="groupManagerList"></div>
+</div>
 
 <script>
 const $ = (s) => document.querySelector(s);
@@ -543,6 +585,8 @@ const $$ = (s) => Array.from(document.querySelectorAll(s));
 let copySeq = 0;
 const copyStore = new Map();
 let ACCOUNTS = [], OUTLOOK = [], CONFIG = [];
+let ACCOUNT_GROUPS = [];
+let ACTIVE_ACCOUNT_GROUP_ID = null;
 const ACCOUNT_SELECTED = new Set();
 const OUTLOOK_SELECTED = new Set();
 let JOBS = [];
@@ -600,6 +644,16 @@ function isPlaceholderEmpty(v) {
   return !s || ['-', '—', '无', '空', 'none', 'null', 'n/a', 'na'].includes(s.toLowerCase());
 }
 function short(v, n=40) { const s = v || ''; return s.length > n ? s.slice(0,n)+'…' : s; }
+function currentMinuteGroupName() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function resetRegistrationGroupName() {
+  const el = $('#regGroup');
+  el.value = currentMinuteGroupName();
+  el.dataset.customName = '0';
+}
 function copyId(v) { if (!v) return ''; const id = 'c'+(++copySeq); copyStore.set(id, v); return id; }
 function cbtn(label, value, cls='') { const id = copyId(value); return `<button class="${cls}" data-copy-id="${id}" ${id?'':'disabled'}>${label}</button>`; }
 function pill(status) {
@@ -651,9 +705,21 @@ async function loadSummary() {
 }
 
 // ---------- 注册 / 任务 ----------
+resetRegistrationGroupName();
+$('#regGroup').addEventListener('input', (e) => {
+  e.target.dataset.customName = e.target.value.trim() ? '1' : '0';
+});
 $('#btnStart').addEventListener('click', async () => {
   const count = parseInt($('#regCount').value || '1', 10);
   const workers = parseInt($('#regWorkers').value || '3', 10);
+  const groupInput = $('#regGroup');
+  if (groupInput.dataset.customName !== '1' || !groupInput.value.trim()) {
+    groupInput.value = currentMinuteGroupName();
+    groupInput.dataset.customName = '0';
+  }
+  const groupName = groupInput.value.trim();
+  if (!groupName) { showToast('分组名称不能为空'); return; }
+  if (groupName.length > 80) { showToast('分组名称最多 80 个字符'); return; }
   const active = JOBS.filter(j => ['pending','running','stopping'].includes(j.status));
   if (active.length > 0) {
     const ok = confirm(
@@ -666,8 +732,12 @@ $('#btnStart').addEventListener('click', async () => {
   $('#btnStart').disabled = true;
   const restoreBtn = () => { $('#btnStart').disabled = false; };
   try {
-    const r = await api('/api/jobs', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({count, workers}) });
-    $('#regWarn').innerHTML = r.warning ? `<div class="banner warn">${esc(r.warning)}（本次并发 ${r.workers || workers}）</div>` : `<div class="banner info">已提交 ${r.submitted} 个任务，本次并发 ${r.workers || workers}</div>`;
+    const r = await api('/api/jobs', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({count, workers, group_name: groupName}) });
+    const finalGroupName = r.group?.name || groupName;
+    $('#regWarn').innerHTML = r.warning
+      ? `<div class="banner warn">${esc(r.warning)}（分组：${esc(finalGroupName)}；本次并发 ${r.workers || workers}）</div>`
+      : `<div class="banner info">已提交 ${r.submitted} 个任务，分组：${esc(finalGroupName)}，本次并发 ${r.workers || workers}</div>`;
+    resetRegistrationGroupName();
     refreshJobs();
   } catch(e) { $('#regWarn').innerHTML = `<div class="banner warn">${esc(e.message)}</div>`; }
   finally { setTimeout(restoreBtn, 3000); }
@@ -768,7 +838,7 @@ async function refreshJobs() {
 
 let modalScrollY = 0;
 function updateModalScrollLock() {
-  const opened = !$('#logPanel').classList.contains('hidden') || !$('#retryLogPanel').classList.contains('hidden') || !$('#qrPanel').classList.contains('hidden');
+  const opened = !$('#logPanel').classList.contains('hidden') || !$('#retryLogPanel').classList.contains('hidden') || !$('#qrPanel').classList.contains('hidden') || !$('#groupManagerPanel').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -804,6 +874,10 @@ function openQrModal(url) {
 function closeQrModal() {
   $('#qrPanel').classList.add('hidden');
   $('#qrImage').removeAttribute('src');
+  updateModalScrollLock();
+}
+function closeGroupManager() {
+  $('#groupManagerPanel').classList.add('hidden');
   updateModalScrollLock();
 }
 
@@ -1015,12 +1089,138 @@ async function pollLog() {
 let accountsLoading = false;
 let planStatusLoading = false;
 let planStatusRevision = '';
+function accountGroupScopedRows() {
+  if (ACTIVE_ACCOUNT_GROUP_ID == null) return ACCOUNTS;
+  return ACCOUNTS.filter(r => Number(r.group_id || 0) === Number(ACTIVE_ACCOUNT_GROUP_ID));
+}
+function accountFilteredRows() {
+  const q = $('#qAccounts').value.trim().toLowerCase();
+  return accountGroupScopedRows().filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
+}
+function activeAccountGroup() {
+  return ACCOUNT_GROUPS.find(g => Number(g.id) === Number(ACTIVE_ACCOUNT_GROUP_ID)) || null;
+}
+function renderAccountGroupTabs() {
+  const tabs = $('#accountGroupTabs');
+  if (!tabs) return;
+  const visibleGroups = ACCOUNT_GROUPS.filter(g => Number(g.account_count || 0) > 0);
+  if (ACTIVE_ACCOUNT_GROUP_ID != null && !visibleGroups.some(g => Number(g.id) === Number(ACTIVE_ACCOUNT_GROUP_ID))) {
+    ACTIVE_ACCOUNT_GROUP_ID = null;
+    ACCOUNT_SELECTED.clear();
+  }
+  tabs.innerHTML = `<button type="button" data-account-group-id="all" class="${ACTIVE_ACCOUNT_GROUP_ID == null ? 'active' : ''}">全部账号</button>` +
+    visibleGroups.map(g => `<button type="button" data-account-group-id="${esc(g.id)}" class="${Number(g.id) === Number(ACTIVE_ACCOUNT_GROUP_ID) ? 'active' : ''}" title="${esc(g.name)}">${esc(g.name)}</button>`).join('');
+  const group = activeAccountGroup();
+  const tokenBtn = $('#copyAllTokens');
+  const lineBtn = $('#copyAllLines');
+  if (tokenBtn) tokenBtn.title = group ? `复制分组“${group.name}”中的全部 Token` : '复制全部账号的 Token';
+  if (lineBtn) lineBtn.title = group ? `复制分组“${group.name}”中的全部整行` : '复制全部账号的整行';
+}
+async function loadAccountGroups() {
+  try {
+    ACCOUNT_GROUPS = await api('/api/account-groups?include_empty=1');
+    renderAccountGroupTabs();
+    renderGroupManagerList();
+  } catch(e) {}
+}
 async function loadAccounts() {
   if (accountsLoading) return;
   accountsLoading = true;
-  try { ACCOUNTS = await api('/api/accounts?limit=2000'); renderAccounts(); } catch(e) {}
+  try {
+    const [accounts, groups] = await Promise.all([
+      api('/api/accounts?limit=2000'),
+      api('/api/account-groups?include_empty=1'),
+    ]);
+    ACCOUNTS = accounts;
+    ACCOUNT_GROUPS = groups;
+    renderAccountGroupTabs();
+    renderAccounts();
+    renderGroupManagerList();
+  } catch(e) {}
   finally { accountsLoading = false; }
 }
+function renderGroupManagerList() {
+  const list = $('#groupManagerList');
+  if (!list) return;
+  if (!ACCOUNT_GROUPS.length) {
+    list.innerHTML = '<div class="muted" style="padding:12px 0;">还没有注册分组。开始一批注册后，分组会出现在这里。</div>';
+    return;
+  }
+  list.innerHTML = ACCOUNT_GROUPS.map(group => `
+    <div class="group-manager-row">
+      <div class="group-manager-main">
+        <div class="group-manager-name">${esc(group.name)}</div>
+        <div class="group-manager-meta">${Number(group.account_count || 0)} 个账号 · 创建于 ${esc(group.created_at || '-')}</div>
+      </div>
+      <div class="group-manager-actions">
+        <button type="button" data-group-rename="${esc(group.id)}">编辑</button>
+        <button type="button" class="danger" data-group-delete="${esc(group.id)}">删除</button>
+      </div>
+    </div>`).join('');
+}
+async function openGroupManager() {
+  await loadAccountGroups();
+  renderGroupManagerList();
+  $('#groupManagerPanel').classList.remove('hidden');
+  updateModalScrollLock();
+}
+async function renameAccountGroup(groupId) {
+  const group = ACCOUNT_GROUPS.find(item => Number(item.id) === Number(groupId));
+  if (!group) return;
+  const name = prompt('修改分组名称（最多 80 个字符）', group.name || '');
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) { showToast('分组名称不能为空'); return; }
+  if (trimmed.length > 80) { showToast('分组名称最多 80 个字符'); return; }
+  try {
+    const r = await api(`/api/account-groups/${groupId}/rename`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name: trimmed}),
+    });
+    const local = ACCOUNT_GROUPS.find(item => Number(item.id) === Number(groupId));
+    if (local) Object.assign(local, r.group || {});
+    ACCOUNTS.forEach(account => {
+      if (Number(account.group_id || 0) === Number(groupId)) account.group_name = trimmed;
+    });
+    renderAccountGroupTabs();
+    renderGroupManagerList();
+    showToast('分组名称已更新');
+  } catch(e) { showToast('编辑分组失败: ' + e.message); }
+}
+async function deleteAccountGroup(groupId) {
+  const group = ACCOUNT_GROUPS.find(item => Number(item.id) === Number(groupId));
+  if (!group) return;
+  const count = Number(group.account_count || 0);
+  if (!confirm(`确定删除分组“${group.name}”吗？\n\n分组中的 ${count} 个账号会保留并变为未分组。`)) return;
+  try {
+    const r = await api(`/api/account-groups/${groupId}/delete`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    if (Number(ACTIVE_ACCOUNT_GROUP_ID) === Number(groupId)) {
+      ACTIVE_ACCOUNT_GROUP_ID = null;
+      ACCOUNT_SELECTED.clear();
+      PAGERS.accounts.page = 1;
+    }
+    showToast(`已删除分组，${r.detached_accounts || 0} 个账号转为未分组`);
+    await loadAccounts();
+    renderGroupManagerList();
+  } catch(e) { showToast('删除分组失败: ' + e.message); }
+}
+$('#accountGroupTabs').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-account-group-id]');
+  if (!btn) return;
+  const raw = btn.dataset.accountGroupId;
+  ACTIVE_ACCOUNT_GROUP_ID = raw === 'all' ? null : Number(raw);
+  ACCOUNT_SELECTED.clear();
+  PAGERS.accounts.page = 1;
+  renderAccountGroupTabs();
+  renderAccounts();
+});
+$('#btnManageGroups').addEventListener('click', openGroupManager);
+$('#btnCloseGroupManager').addEventListener('click', closeGroupManager);
+$('#groupManagerList').addEventListener('click', (e) => {
+  const rename = e.target.closest('[data-group-rename]');
+  if (rename) { renameAccountGroup(Number(rename.dataset.groupRename)); return; }
+  const del = e.target.closest('[data-group-delete]');
+  if (del) deleteAccountGroup(Number(del.dataset.groupDelete));
+});
 async function pollAccountPlanStatuses() {
   if (planStatusLoading || accountsLoading) return;
   planStatusLoading = true;
@@ -1042,6 +1242,7 @@ async function pollAccountPlanStatuses() {
         const isChecking = ['queued', 'running'].includes(item.plan_check_status);
         const wasExtracting = ['queued', 'running'].includes(account?.extract_link_status);
         const isExtracting = ['queued', 'running'].includes(item.extract_link_status);
+        if (Number(account?.group_id || 0) !== Number(item.group_id || 0)) needsFullReload = true;
         if (wasChecking && !isChecking) needsFullReload = true;
         if (wasExtracting && !isExtracting) needsFullReload = true;
         Object.assign(account, item);
@@ -1209,12 +1410,11 @@ function _codexAction(r) {
   return `<button data-codex-retry="${esc(r.email)}" title="重新跑一次 Codex 授权（会消耗 1 封邮箱 OTP + 1 个接码短信）">${label}</button>`;
 }
 function renderAccounts() {
-  const q = $('#qAccounts').value.trim().toLowerCase();
-  const filtered = ACCOUNTS.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
+  const filtered = accountFilteredRows();
   const p = PAGERS.accounts;
   const total = filtered.length;
   const rows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
-  const existingIds = new Set(ACCOUNTS.map(r => Number(r.id)));
+  const existingIds = new Set(accountGroupScopedRows().map(r => Number(r.id)));
   for (const id of Array.from(ACCOUNT_SELECTED)) {
     if (!existingIds.has(Number(id))) ACCOUNT_SELECTED.delete(id);
   }
@@ -1261,8 +1461,7 @@ function updateAccountSelectionUi(pageRows = null) {
   const cbAll = $('#accountsSelectAll');
   if (!cbAll) return;
   if (!pageRows) {
-    const q = $('#qAccounts').value.trim().toLowerCase();
-    const filtered = ACCOUNTS.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
+    const filtered = accountFilteredRows();
     const p = PAGERS.accounts;
     pageRows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
   }
@@ -1408,8 +1607,7 @@ $('#accountsBody').addEventListener('change', (e) => {
   updateAccountSelectionUi();
 });
 $('#accountsSelectAll').addEventListener('change', (e) => {
-  const q = $('#qAccounts').value.trim().toLowerCase();
-  const filtered = ACCOUNTS.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
+  const filtered = accountFilteredRows();
   const p = PAGERS.accounts;
   const pageRows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
   if (e.target.checked) pageRows.forEach(r => ACCOUNT_SELECTED.add(Number(r.id)));
@@ -1760,8 +1958,18 @@ async function retrySelectedCodex() {
 }
 
 $('#qAccounts').addEventListener('input', () => { PAGERS.accounts.page = 1; renderAccounts(); });
-$('#copyAllTokens').addEventListener('click', () => copyText(ACCOUNTS.map(r=>r.access_token).filter(Boolean).join('\n')));
-$('#copyAllLines').addEventListener('click', () => copyText(ACCOUNTS.map(r=>r.copy_line).filter(Boolean).join('\n')));
+$('#copyAllTokens').addEventListener('click', () => {
+  const rows = accountGroupScopedRows();
+  const tokens = rows.map(r => r.access_token).filter(Boolean).join('\n');
+  if (!tokens) { showToast(activeAccountGroup() ? '当前分组没有 Token' : '没有可复制的 Token'); return; }
+  copyText(tokens);
+});
+$('#copyAllLines').addEventListener('click', () => {
+  const rows = accountGroupScopedRows();
+  const lines = rows.map(r => r.copy_line).filter(Boolean).join('\n');
+  if (!lines) { showToast(activeAccountGroup() ? '当前分组没有账号' : '没有可复制的账号'); return; }
+  copyText(lines);
+});
 
 // ---------- 邮箱池 ----------
 function poolKey(r) { return `${r.source || $('#poolSource')?.value || 'outlook'}|${r.email || ''}`; }

@@ -90,6 +90,26 @@ def _append_job_log(job_id: int, message: str) -> None:
         pass
 
 
+def _assign_job_group(job_id: int, account_id: int | None) -> None:
+    """注册账号落库后，把任务携带的批次分组同步到账号记录。"""
+    if not account_id:
+        return
+    try:
+        job = db.get_job(job_id)
+        group_id = (job or {}).get("group_id")
+        if group_id is None:
+            return
+        if not db.assign_account_group(int(account_id), int(group_id)):
+            logger.warning(
+                "[Service] 账号分组关联失败: job_id=%s account_id=%s group_id=%s",
+                job_id,
+                account_id,
+                group_id,
+            )
+    except Exception:
+        logger.exception("[Service] 同步注册账号分组失败: job_id=%s account_id=%s", job_id, account_id)
+
+
 def _random_display_name() -> str:
     """生成符合 OpenAI 限制的英文字母显示名。"""
     import random
@@ -320,6 +340,7 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                 log_logger.warning(f"[Job {job_id}] 已按用户请求停止")
                 return
             if isinstance(result, dict) and result.get("success"):
+                _assign_job_group(job_id, result.get("account_id"))
                 db.update_job(
                     job_id,
                     status="success",
@@ -332,11 +353,13 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                 # 注意：失败也可能伴随 account_id（如 Codex 失败但账号已注册成功）
                 err = (result or {}).get("error") if isinstance(result, dict) else "unknown"
                 result_email = (result or {}).get("email") if isinstance(result, dict) else None
+                result_account_id = (result or {}).get("account_id") if isinstance(result, dict) else None
+                _assign_job_group(job_id, result_account_id)
                 db.update_job(
                     job_id,
                     status="failed",
                     email=result_email,
-                    account_id=(result or {}).get("account_id") if isinstance(result, dict) else None,
+                    account_id=result_account_id,
                     error=str(err)[:500],
                     completed_at=datetime.now().isoformat(timespec="seconds"),
                 )
@@ -434,7 +457,12 @@ def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int
 # 公共接口
 # ============================================================
 
-def submit_registration(count: int = 1, email_source: str | None = None, workers: int | None = None) -> list[dict]:
+def submit_registration(
+    count: int = 1,
+    email_source: str | None = None,
+    workers: int | None = None,
+    group_id: int | None = None,
+) -> list[dict]:
     """
     创建 N 个注册任务并提交到线程池。
     email_source 仅记录到 DB；实际邮箱来源固定为 Outlook 账号池。
@@ -453,7 +481,10 @@ def submit_registration(count: int = 1, email_source: str | None = None, workers
         effective_workers = get_executor_workers()
         jobs = []
         for _ in range(count):
-            job = db.create_job(email_source=email_source)
+            if group_id is None:
+                job = db.create_job(email_source=email_source)
+            else:
+                job = db.create_job(email_source=email_source, group_id=group_id)
             try:
                 executor.submit(_run_one_job, job["id"], job["log_file"])
             except Exception as exc:
@@ -465,7 +496,10 @@ def submit_registration(count: int = 1, email_source: str | None = None, workers
                 )
                 logger.exception("[Service] 注册任务 #%s 提交线程池失败", job["id"])
             jobs.append(db.get_job(int(job["id"])) or job)
-    logger.info(f"[Service] 已提交 {count} 个注册任务，源={email_source}，workers={effective_workers}")
+    logger.info(
+        f"[Service] 已提交 {count} 个注册任务，源={email_source}，"
+        f"workers={effective_workers}，group_id={group_id or '-'}"
+    )
     return jobs
 
 
