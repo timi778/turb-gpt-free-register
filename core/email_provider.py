@@ -101,6 +101,12 @@ def resolve_email_source(email: str) -> str:
         return "cloudmail"
 
     from core import db
+    # 注册成功账号会持久化 email_source；即使临时邮箱上下文已释放，
+    # 后续登录触发的 OTP 仍应按原来源取信（尤其是 MailNest）。
+    registered = db.get_account_by_email(email)
+    registered_source = str((registered or {}).get("email_source") or "").strip().lower()
+    if registered_source in {"gptmail", "cloudflare", "mailnest", "cloudmail", "generic_api", "outlook", "cloudflare_domain"}:
+        return registered_source
     if db.get_generic_api_email_by_email(email):
         return "generic_api"
     if db.get_outlook_by_email(email):

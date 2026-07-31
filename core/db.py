@@ -14,7 +14,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,9 @@ _LEGACY_DATA_DIR = _PROJECT_ROOT / "data"
 _LOG_DIR = _PROJECT_ROOT / "注册日志"
 _PLAN_CHECK_STALE_SECONDS = 120
 _PLAN_CHECK_QUEUE_STALE_SECONDS = 1800
+_TOKEN_REFRESH_STALE_SECONDS = 15 * 60
+_TOKEN_REFRESH_QUEUE_STALE_SECONDS = 30 * 60
+_ACCESS_TOKEN_LIFETIME_DAYS = 10
 
 _OUTLOOK_JSON = _PROJECT_ROOT / "用于注册的邮箱.json"
 _OUTLOOK_TXT = _PROJECT_ROOT / "用于注册的邮箱.txt"
@@ -550,6 +553,19 @@ def _decorate_account(row: dict, group_by_id: dict[int, str] | None = None) -> d
     out["group_name"] = (group_by_id or {}).get(group_id, "") if group_id else ""
     out["note"] = out.get("note") or ""
     out["note_updated_at"] = out.get("note_updated_at") or ""
+    issued_at = str(out.get("access_token_updated_at") or out.get("created_at") or "")
+    out["access_token_issued_at"] = issued_at if out.get("access_token") else ""
+    out["access_token_expires_at"] = ""
+    out["access_token_remaining_seconds"] = None
+    if out["access_token_issued_at"]:
+        try:
+            issued = datetime.fromisoformat(out["access_token_issued_at"].replace("Z", "+00:00"))
+            expires = issued + timedelta(days=_ACCESS_TOKEN_LIFETIME_DAYS)
+            now = datetime.now(expires.tzinfo) if expires.tzinfo else datetime.now()
+            out["access_token_expires_at"] = expires.isoformat(timespec="seconds")
+            out["access_token_remaining_seconds"] = int((expires - now).total_seconds())
+        except (TypeError, ValueError):
+            pass
     plan_status = out.get("plan_check_status")
     if plan_status in {"queued", "running"}:
         try:
@@ -784,15 +800,19 @@ def insert_account(
 
         if existing is None:
             row_id = _next_id(accounts)
+            now = _now()
             row = {
                 "id": row_id,
                 "email": email,
-                "created_at": _now(),
+                "created_at": now,
             }
             accounts.append(row)
         else:
             row = existing
             row_id = int(row["id"])
+            now = _now()
+
+        previous_access_token = row.get("access_token")
 
         row.update({
             "access_token": access_token,
@@ -808,8 +828,13 @@ def insert_account(
             "extra_json": extra_json if extra_json is not None else row.get("extra_json"),
             "codex_status": codex_status if codex_status is not None else row.get("codex_status"),
             "codex_error": codex_error if codex_error is not None else row.get("codex_error"),
-            "updated_at": _now(),
+            "updated_at": now,
         })
+        if access_token and (
+            not row.get("access_token_updated_at")
+            or access_token != previous_access_token
+        ):
+            row["access_token_updated_at"] = now
 
         if outlook_row:
             row["password"] = outlook_row.get("password")
@@ -845,6 +870,105 @@ def update_account_codex_status(email: str, codex_status: str, codex_error: str 
         row["updated_at"] = _now()
         _save_accounts(accounts)
         return True
+
+
+def claim_account_token_refresh(acc_id: int, trigger: str = "manual") -> bool:
+    """原子占用账号 Token 刷新任务；已有未超时任务时返回 False。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((item for item in accounts if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        current_status = str(row.get("token_refresh_status") or "")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "token_refresh_queued_at" if current_status == "queued" else "token_refresh_started_at"
+                stale_after = _TOKEN_REFRESH_QUEUE_STALE_SECONDS if current_status == "queued" else _TOKEN_REFRESH_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row["token_refresh_status"] = "queued"
+        row["token_refresh_trigger"] = str(trigger or "manual")
+        row["token_refresh_queued_at"] = now
+        row["token_refresh_started_at"] = None
+        row["token_refresh_completed_at"] = None
+        row["token_refresh_error"] = None
+        row["token_refresh_message"] = "已加入 Token 更新队列"
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def mark_account_token_refresh_running(acc_id: int) -> bool:
+    """把已排队的 Token 刷新任务标记为执行中。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((item for item in accounts if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("token_refresh_status") not in {"queued", "running"}:
+            return False
+        now = _now()
+        row["token_refresh_status"] = "running"
+        row["token_refresh_started_at"] = now
+        row["token_refresh_error"] = None
+        row["token_refresh_message"] = "正在通过 Roxy 登录并更新 Token"
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def complete_account_token_refresh(acc_id: int, result: dict | None = None) -> bool:
+    """保存 Token 刷新结果；成功时原子覆盖 access_token 并重置 10 天时效。"""
+    result = result or {}
+    access_token = str(result.get("access_token") or "").strip()
+    ok = bool(result.get("ok")) and bool(access_token)
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((item for item in accounts if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        now = _now()
+        row["token_refresh_status"] = "success" if ok else "failed"
+        row["token_refresh_ok"] = ok
+        row["token_refresh_completed_at"] = now
+        row["token_refresh_error"] = None if ok else str(result.get("error") or result.get("message") or "Token 更新失败")[:500]
+        row["token_refresh_message"] = str(result.get("message") or ("Token 更新成功" if ok else "Token 更新失败"))[:300]
+        if ok:
+            row["access_token"] = access_token
+            row["access_token_updated_at"] = now
+            session_info = result.get("session_info") if isinstance(result.get("session_info"), dict) else {}
+            if session_info.get("user") is not None:
+                row["token_refresh_user"] = session_info.get("user")
+            if session_info.get("account") is not None:
+                row["token_refresh_account"] = session_info.get("account")
+            if session_info.get("expires") is not None:
+                row["token_refresh_session_expires"] = session_info.get("expires")
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def recover_interrupted_token_refreshes() -> int:
+    """服务启动时把上次进程遗留的 Token 更新任务恢复为失败。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in accounts:
+            if row.get("token_refresh_status") not in {"queued", "running"}:
+                continue
+            row["token_refresh_status"] = "failed"
+            row["token_refresh_ok"] = False
+            row["token_refresh_error"] = "WebUI 重启导致 Token 更新中断，请重新更新"
+            row["token_refresh_message"] = "Token 更新已中断"
+            row["token_refresh_completed_at"] = now
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(accounts)
+        return recovered
 
 
 def claim_account_plan_check(
@@ -1126,6 +1250,10 @@ def list_account_plan_check_statuses(limit: int = 5000) -> dict:
         "extract_link_expires_at", "extract_link_payment_method",
         "extract_link_payment_link_type",
         "extract_link_checked_at", "extract_link_completed_at",
+        "access_token_updated_at", "access_token_issued_at", "access_token_expires_at",
+        "access_token_remaining_seconds", "token_refresh_status", "token_refresh_ok",
+        "token_refresh_trigger", "token_refresh_queued_at", "token_refresh_started_at",
+        "token_refresh_completed_at", "token_refresh_message", "token_refresh_error",
     )
     with _LOCK:
         rows = sorted(_load_accounts(), key=lambda x: int(x.get("id") or 0), reverse=True)[:max(1, int(limit))]

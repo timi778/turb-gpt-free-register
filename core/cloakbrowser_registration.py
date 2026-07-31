@@ -18,7 +18,8 @@ from core.roxy_registration import (  # noqa: F401
     _maybe_accept, _submit_email_and_wait_next, _fill_password_page_if_present,
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
-    _password_setup_enabled, _setup_account_password,
+    _password_setup_enabled, _setup_account_password, _fetch_session_after_password_flow,
+    _ensure_registration_session,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,22 +94,29 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
             create_acknowledged = True
             human_delay("post_auth")
 
-        session_info = _fetch_chatgpt_session(driver, timeout=120)
-        access_token = session_info["accessToken"]
-        logger.info("[Cloak注册] 已拿到 accessToken：%s", email)
-
         password_setup = {
             "status": "already_set" if openai_password else "skipped",
             "ok": True,
             "message": "注册阶段已设置密码" if openai_password else "配置已关闭",
         }
         if not openai_password and _password_setup_enabled():
+            _ensure_registration_session(driver, email)
             try:
                 openai_password = _setup_account_password(driver, email)
                 password_setup = {"status": "success", "ok": True, "message": "安全设置密码成功"}
             except Exception as exc:
                 password_setup = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {str(exc)[:220]}"}
                 logger.warning("[Cloak注册][密码] 设置失败，仍将保存账号和 Token：%s", password_setup["message"])
+
+        # 设置密码可能刷新当前登录 session，必须在密码流程完成后读取最新 Token。
+        session_info = _fetch_session_after_password_flow(
+            driver,
+            email,
+            openai_password,
+            timeout=120,
+        )
+        access_token = session_info["accessToken"]
+        logger.info("[Cloak注册] 已拿到密码流程后的 accessToken：%s", email)
 
         if _twofa_cfg.ENABLE_2FA:
             logger.warning("[Cloak注册] 当前 CloakBrowser 自动化路径暂不执行 2FA 设置，已跳过")

@@ -661,7 +661,8 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
             timeout_ms=8000,
         ):
             page.keyboard.press("Enter")
-        _bu_delay("form")
+        # 密码输入不受快速模式的 0.12s 固定等待影响，保持真实的随机表单节奏。
+        human_delay("form")
         return password
     return None
 
@@ -735,6 +736,7 @@ def _wait_for_new_password_form(page, context=None, timeout: int = 35):
 def _open_password_reset_flow(page, context=None, timeout: int = 25):
     otp_after_ts = time.time()
     page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded")
+    human_delay("navigate")
     end = time.time() + timeout
     last = {}
     while time.time() < end:
@@ -744,14 +746,17 @@ def _open_password_reset_flow(page, context=None, timeout: int = 25):
         last = _password_reset_state(page)
         if last.get("hasPasswordSetting"):
             otp_after_ts = time.time()
+            human_delay("form")
             if _click_first(page, ["button[data-testid='password-setting']"], timeout_ms=3000):
                 logger.info("[BrowserUse][密码] 已从安全设置点击密码入口")
+                human_delay("navigate")
                 return page, otp_after_ts
         time.sleep(0.2 if _fast_mode() else 0.5)
 
     logger.info("[BrowserUse][密码] 安全设置未出现密码入口，改用密码设置直达地址：state=%s", last)
     otp_after_ts = time.time()
     page.goto("https://auth.openai.com/reset-password/new-password", wait_until="domcontentloaded")
+    human_delay("navigate")
     return page, otp_after_ts
 
 
@@ -829,6 +834,7 @@ def _complete_password_reauth_if_needed(page, context, email: str, otp_after_ts:
 
 
 def _submit_new_password(page, context, password: str, timeout: int = 35):
+    human_delay("form")
     if not _fill_first(page, ["input[name='new-password']"], password, timeout_ms=8000):
         raise RuntimeError(f"找不到新密码输入框: {_password_reset_state(page)}")
     if not _fill_first(page, ["input[name='confirm-password']"], password, timeout_ms=8000):
@@ -842,6 +848,7 @@ def _submit_new_password(page, context, password: str, timeout: int = 35):
         timeout_ms=8000,
     ):
         raise RuntimeError(f"找不到新密码提交按钮: {_password_reset_state(page)}")
+    human_delay("navigate")
 
     end = time.time() + timeout
     last = {}
@@ -861,11 +868,40 @@ def _submit_new_password(page, context, password: str, timeout: int = 35):
 def _setup_account_password(page, context, email: str):
     password = _registration_password()
     logger.info("[BrowserUse][密码] 开始为账号补设密码（%s 位）：%s", len(password), email)
-    page, otp_after_ts = _open_password_reset_flow(page, context=context)
-    page = _complete_password_reauth_if_needed(page, context, email, otp_after_ts)
-    page = _wait_for_new_password_form(page, context=context)
-    page = _submit_new_password(page, context, password)
-    logger.info("[BrowserUse][密码] 账号密码设置成功：%s", email)
+    original_page = page
+    password_page = page
+    dedicated_page = False
+    if context is not None:
+        try:
+            password_page = context.new_page()
+            page = password_page
+            dedicated_page = True
+            logger.info("[BrowserUse][密码] 已在独立标签页打开密码设置流程")
+        except Exception as exc:
+            logger.info("[BrowserUse][密码] 无法创建独立标签页，继续使用当前页：%s", str(exc)[:140])
+
+    try:
+        page, otp_after_ts = _open_password_reset_flow(page, context=context)
+        page = _complete_password_reauth_if_needed(page, context, email, otp_after_ts)
+        page = _wait_for_new_password_form(page, context=context)
+        page = _submit_new_password(page, context, password)
+        human_delay("post_auth")
+        logger.info("[BrowserUse][密码] 账号密码设置成功：%s", email)
+    finally:
+        if dedicated_page:
+            try:
+                if password_page is not original_page and not password_page.is_closed():
+                    password_page.close()
+            except Exception:
+                pass
+
+    try:
+        if not original_page.is_closed():
+            original_page.bring_to_front()
+            page = original_page
+            logger.info("[BrowserUse][密码] 已返回原 ChatGPT 标签页")
+    except Exception:
+        page = _pick_live_page(context, page) or page
     return page, password
 
 
@@ -2046,14 +2082,6 @@ def run_browser_use_registration(
                 create_acknowledged = True
                 _bu_delay("post_auth")
 
-            session_info = _fetch_chatgpt_session(page, context=context, timeout=28 if _fast_mode() else 120)
-            _t_profile.done()
-            access_token = session_info.get("accessToken")
-            if not access_token:
-                raise RuntimeError("注册流程结束但未拿到 accessToken")
-            create_acknowledged = True
-            logger.info("[BrowserUse] 已拿到 accessToken：%s", email)
-
             password_setup = {
                 "status": "already_set" if openai_password else "skipped",
                 "ok": True,
@@ -2071,6 +2099,15 @@ def run_browser_use_registration(
                     }
                     logger.warning("[BrowserUse][密码] 设置失败，仍将保存账号和 Token：%s", password_setup["message"])
             _check_manual_stop()
+
+            # 设置密码可能刷新或替换当前登录 session；必须在密码流程完成后读取最新 Token。
+            session_info = _fetch_chatgpt_session(page, context=context, timeout=28 if _fast_mode() else 120)
+            _t_profile.done()
+            access_token = session_info.get("accessToken")
+            if not access_token:
+                raise RuntimeError("注册流程结束但未拿到密码流程后的 accessToken")
+            create_acknowledged = True
+            logger.info("[BrowserUse] 已拿到密码流程后的 accessToken：%s", email)
 
             if _twofa_cfg.ENABLE_2FA:
                 logger.warning("[BrowserUse] 当前路径暂不自动设置 2FA，已跳过")

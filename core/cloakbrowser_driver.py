@@ -122,6 +122,9 @@ class _SwitchTo:
     def window(self, handle: str) -> None:
         self._driver._switch_window(handle)
 
+    def new_window(self, _type_hint: str = "tab") -> None:
+        self._driver._new_window()
+
 
 class CloakSeleniumDriver:
     """只实现本项目 Roxy Selenium 流程实际用到的 WebDriver 子集。"""
@@ -142,6 +145,14 @@ class CloakSeleniumDriver:
         pages = self._pages()
         return [str(i) for i in range(len(pages))]
 
+    @property
+    def current_window_handle(self) -> str:
+        pages = self._pages()
+        for index, page in enumerate(pages):
+            if page is self.page:
+                return str(index)
+        raise RuntimeError("当前 CloakBrowser 页面已关闭")
+
     def _pages(self) -> list[Any]:
         try:
             if self.context is not None:
@@ -161,6 +172,15 @@ class CloakSeleniumDriver:
         pages = self._pages()
         idx = int(handle)
         self.page = pages[idx]
+        try:
+            self.page.bring_to_front()
+        except Exception:
+            pass
+
+    def _new_window(self) -> None:
+        if self.context is None:
+            raise RuntimeError("CloakBrowser context 不可用，无法创建新标签页")
+        self.page = self.context.new_page()
         try:
             self.page.bring_to_front()
         except Exception:

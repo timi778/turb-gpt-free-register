@@ -51,6 +51,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_extract_links = db.recover_interrupted_extract_links()
     if recovered_extract_links:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的提链状态", recovered_extract_links)
+    recovered_token_refreshes = db.recover_interrupted_token_refreshes()
+    if recovered_token_refreshes:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的 Token 更新状态", recovered_token_refreshes)
 
     # ----------------------------------------------------------
     # 页面
@@ -221,6 +224,69 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped": skipped,
             "skipped_count": len(skipped),
         })
+
+
+    @app.post("/api/accounts/token-refresh-bulk")
+    def api_accounts_token_refresh_bulk():
+        """批量用已保存密码通过 Roxy 登录并更新 accessToken。"""
+        from core import token_refresh_service
+
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        workers = data.get("workers", 3)
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        try:
+            workers = max(1, min(16, int(workers)))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "workers 必须是数字"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多选择 500 个账号"}), 400
+
+        selected = []
+        skipped = []
+        seen_ids = set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen_ids:
+                continue
+            seen_ids.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            email = str(acc.get("email") or "").strip()
+            password = str(acc.get("registration_password") or "")
+            if not email:
+                skipped.append({"id": acc_id, "reason": "邮箱为空"})
+                continue
+            if not password:
+                skipped.append({"id": acc_id, "email": email, "reason": "账号未保存密码"})
+                continue
+            if not db.claim_account_token_refresh(acc_id, trigger="manual_bulk"):
+                skipped.append({"id": acc_id, "email": email, "reason": "Token 更新中"})
+                continue
+            selected.append({"id": acc_id, "email": email, "password": password})
+
+        if not selected:
+            return jsonify({"ok": False, "error": "没有可更新 Token 的账号", "skipped": skipped}), 409
+        try:
+            batch = token_refresh_service.start_batch(selected, workers)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"Token 更新任务启动失败: {type(exc).__name__}: {exc}", "skipped": skipped}), 500
+        return jsonify({
+            "ok": True,
+            "message": f"已开始更新 {len(selected)} 个账号 Token，并发 {workers}",
+            "started": [{"id": item["id"], "email": item["email"]} for item in selected],
+            "started_count": len(selected),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+            **batch,
+        }), 202
 
 
     @app.post("/api/accounts/check-plan")

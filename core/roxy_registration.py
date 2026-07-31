@@ -477,7 +477,7 @@ def _is_email_verification_page(driver) -> bool:
         url = str(driver.current_url or '').lower()
     except Exception:
         url = ''
-    if '/log-in/password' in url:
+    if _is_login_password_url(url):
         return False
     if 'email-verification' in url:
         return True
@@ -911,12 +911,22 @@ def _password_page_state(driver) -> dict:
         return {"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}
 
 
+def _is_login_password_url(url: str) -> bool:
+    normalized = str(url or '').lower()
+    return any(path in normalized for path in (
+        '/log-in/password',
+        '/login/password',
+        '/u/log-in/password',
+        '/u/login/password',
+    ))
+
+
 def _is_signup_password_page(driver) -> bool:
     state = _password_page_state(driver)
     url = str(state.get('url') or '').lower()
     if any(x in url for x in ('/create-account/password', '/u/signup/password', '/signup/password')):
         return True
-    if '/log-in/password' in url:
+    if _is_login_password_url(url):
         return False
     inputs = state.get('inputs') or []
     return any(
@@ -934,11 +944,33 @@ def _is_login_password_page(driver) -> bool:
         url = str(driver.current_url or '').lower()
     except Exception:
         url = ''
-    if '/log-in/password' in url:
+    if _is_login_password_url(url):
         return True
     state = _password_page_state(driver)
     url = str(state.get('url') or '').lower()
-    return '/log-in/password' in url
+    if _is_login_password_url(url):
+        return True
+    # auth.openai.com sometimes keeps the SPA route at /email-verification
+    # while replacing the form. Detect the visible current-password control
+    # as a second signal, but never classify reset/signup forms as login.
+    if any(marker in url for marker in (
+        '/reset-password', '/create-account', '/signup', '/sign-up',
+        '/forgot-password', '/password-reset',
+    )):
+        return False
+    for item in state.get('inputs') or []:
+        if not item.get('visible'):
+            continue
+        input_type = str(item.get('type') or '').lower()
+        autocomplete = str(item.get('autocomplete') or '').lower()
+        name = str(item.get('name') or '').lower()
+        input_id = str(item.get('id') or '').lower()
+        if autocomplete == 'current-password':
+            return True
+        if input_type == 'password' and autocomplete not in {'new-password', 'confirm-password'}:
+            if not any(marker in f'{name} {input_id}' for marker in ('new', 'confirm', 'reset', 'signup', 'sign-up')):
+                return True
+    return False
 
 
 def _click_passwordless_signup_if_present(driver) -> dict:
@@ -1049,6 +1081,7 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             return None
         password = _registration_password()
         logger.info("[Roxy注册] 检测到 create-account/password，准备设置密码（%s 位）：email=%s", len(password), email)
+        human_delay("form")
         result = driver.execute_script(r"""
         const password = String(arguments[0]);
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
@@ -1085,6 +1118,7 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         if not result.get('ok'):
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
         logger.info("[Roxy注册] 已填写并提交密码页")
+        human_delay("navigate")
         # 提交密码后通常进入邮箱验证码页，最多等一段时间。
         wait_end = time.time() + 20
         while time.time() < wait_end:
@@ -1110,6 +1144,52 @@ def _password_setup_enabled() -> bool:
         return True
 
 
+def _safe_driver_url(driver) -> str:
+    try:
+        return str(driver.current_url or "")
+    except Exception:
+        return ""
+
+
+def _open_password_setup_tab(driver) -> str | None:
+    """保留原 ChatGPT 标签页，避免密码设置完成时关闭唯一窗口。"""
+    try:
+        original_handle = str(driver.current_window_handle)
+        driver.switch_to.new_window("tab")
+        logger.info("[Roxy注册][密码] 已在独立标签页打开密码设置流程")
+        return original_handle
+    except Exception as exc:
+        logger.info("[Roxy注册][密码] 当前驱动不支持独立标签页，继续使用当前页：%s", str(exc)[:140])
+        return None
+
+
+def _switch_to_password_return_window(driver, handle: str | None) -> bool:
+    if not handle:
+        return False
+    try:
+        handles = [str(item) for item in (driver.window_handles or [])]
+        target = str(handle) if str(handle) in handles else (handles[0] if handles else "")
+        if not target:
+            return False
+        driver.switch_to.window(target)
+        return True
+    except Exception:
+        return False
+
+
+def _restore_password_return_window_if_current_closed(driver, handle: str | None) -> bool:
+    if not handle:
+        return False
+    try:
+        _ = driver.current_url
+        return False
+    except Exception:
+        restored = _switch_to_password_return_window(driver, handle)
+        if restored:
+            logger.info("[Roxy注册][密码] 密码设置标签页已关闭，已切回原 ChatGPT 标签页")
+        return restored
+
+
 def _password_reset_page_state(driver) -> dict:
     try:
         return driver.execute_script(r"""
@@ -1131,7 +1211,7 @@ def _password_reset_page_state(driver) -> dict:
         };
         """) or {}
     except Exception as exc:
-        return {"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}
+        return {"url": _safe_driver_url(driver), "error": f"{type(exc).__name__}: {exc}"}
 
 
 def _has_new_password_form(driver) -> bool:
@@ -1165,6 +1245,7 @@ def _open_password_reset_flow(driver, timeout: int = 25) -> float:
     """从 ChatGPT 安全设置进入密码重置页，返回触发二次 OTP 前的时间戳。"""
     otp_after_ts = time.time()
     driver.get("https://chatgpt.com/#settings/Security")
+    human_delay("navigate")
     end = time.time() + timeout
     last = {}
     while time.time() < end:
@@ -1173,6 +1254,7 @@ def _open_password_reset_flow(driver, timeout: int = 25) -> float:
         last = _password_reset_page_state(driver)
         if last.get("hasPasswordSetting"):
             otp_after_ts = time.time()
+            human_delay("form")
             clicked = driver.execute_script(r"""
             const button = document.querySelector('button[data-testid="password-setting"]');
             if (!button || button.disabled || String(button.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
@@ -1182,12 +1264,14 @@ def _open_password_reset_flow(driver, timeout: int = 25) -> float:
             """)
             if clicked:
                 logger.info("[Roxy注册][密码] 已从安全设置点击密码入口")
+                human_delay("navigate")
                 return otp_after_ts
         time.sleep(0.5)
 
     logger.info("[Roxy注册][密码] 安全设置未出现密码入口，改用密码设置直达地址：state=%s", last)
     otp_after_ts = time.time()
     driver.get("https://auth.openai.com/reset-password/new-password")
+    human_delay("navigate")
     return otp_after_ts
 
 
@@ -1242,7 +1326,8 @@ def _complete_password_reauth_if_needed(driver, email: str, otp_after_ts: float)
     raise RuntimeError("设置密码前的邮箱验证未完成")
 
 
-def _submit_new_password(driver, password: str, timeout: int = 35) -> None:
+def _submit_new_password(driver, password: str, timeout: int = 35, return_window_handle: str | None = None) -> None:
+    human_delay("form")
     result = driver.execute_script(r"""
     const password = String(arguments[0]);
     const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
@@ -1276,12 +1361,17 @@ def _submit_new_password(driver, password: str, timeout: int = 35) -> None:
     """, password) or {}
     if not result.get("ok"):
         raise RuntimeError(f"填写新密码表单失败: {result}, state={_password_reset_page_state(driver)}")
+    human_delay("navigate")
 
     end = time.time() + timeout
     last = {}
     while time.time() < end:
         time.sleep(0.5)
+        if _restore_password_return_window_if_current_closed(driver, return_window_handle):
+            return
         last = _password_reset_page_state(driver)
+        if last.get("error") and _restore_password_return_window_if_current_closed(driver, return_window_handle):
+            return
         if not _has_new_password_form(driver):
             url = str(last.get("url") or "").lower()
             if "email-verification" not in url and "/log-in" not in url and "/login" not in url:
@@ -1294,12 +1384,18 @@ def _submit_new_password(driver, password: str, timeout: int = 35) -> None:
 def _setup_account_password(driver, email: str) -> str:
     password = _registration_password()
     logger.info("[Roxy注册][密码] 开始为账号补设密码（%s 位）：%s", len(password), email)
-    otp_after_ts = _open_password_reset_flow(driver)
-    _complete_password_reauth_if_needed(driver, email, otp_after_ts)
-    _wait_for_new_password_form(driver)
-    _submit_new_password(driver, password)
-    logger.info("[Roxy注册][密码] 账号密码设置成功：%s", email)
-    return password
+    return_window_handle = _open_password_setup_tab(driver)
+    try:
+        otp_after_ts = _open_password_reset_flow(driver)
+        _complete_password_reauth_if_needed(driver, email, otp_after_ts)
+        _wait_for_new_password_form(driver)
+        _submit_new_password(driver, password, return_window_handle=return_window_handle)
+        human_delay("post_auth")
+        logger.info("[Roxy注册][密码] 账号密码设置成功：%s", email)
+        return password
+    finally:
+        if _switch_to_password_return_window(driver, return_window_handle):
+            logger.info("[Roxy注册][密码] 已返回原 ChatGPT 标签页")
 
 
 def _accept_profile_consents(driver) -> int:
@@ -1504,6 +1600,15 @@ def _switch_to_chatgpt_window_if_any(driver) -> bool:
     return False
 
 
+def _is_driver_session_lost_error(exc: Exception | str) -> bool:
+    text = str(exc or "").lower()
+    return any(marker in text for marker in (
+        "invalid session id",
+        "session deleted because of page crash",
+        "disconnected: not connected to devtools",
+    ))
+
+
 def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) -> dict:
     """等待页面完成跳转并从 ChatGPT 页面内读取登录 session/accessToken。
 
@@ -1519,7 +1624,9 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
     while time.time() < end:
         try:
             current = str(driver.current_url or '')
-        except Exception:
+        except Exception as exc:
+            if _is_driver_session_lost_error(exc):
+                raise RuntimeError(f"浏览器 session 已失效，无法读取 ChatGPT accessToken: {exc}") from exc
             current = ''
 
         if 'chatgpt.com' not in current:
@@ -1533,6 +1640,8 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
                     time.sleep(3)
                     current = str(getattr(driver, "current_url", "") or "")
                 except Exception as exc:
+                    if _is_driver_session_lost_error(exc):
+                        raise RuntimeError(f"浏览器 session 已失效，无法打开 ChatGPT: {exc}") from exc
                     last_data = f"{type(exc).__name__}: {exc}"
             else:
                 time.sleep(1)
@@ -1545,10 +1654,94 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
                     return data
                 last_data = "session 暂无 accessToken"
             except Exception as exc:
+                if _is_driver_session_lost_error(exc):
+                    raise RuntimeError(f"浏览器 session 已失效，无法读取 ChatGPT session: {exc}") from exc
                 last_data = f"{type(exc).__name__}: {exc}"
         time.sleep(2)
 
     raise RuntimeError(f"等待 /api/auth/session accessToken 超时，最后响应: {str(last_data)[:800]}")
+
+
+def _fetch_session_after_password_flow(
+    driver,
+    email: str,
+    password: str | None,
+    *,
+    timeout: int = 120,
+) -> dict:
+    """密码设置后先读 session；若已退出登录，则用新密码重新登录获取最新 Token。"""
+    if not password:
+        return _fetch_chatgpt_session(driver, timeout=timeout)
+    try:
+        return _fetch_chatgpt_session(driver, timeout=min(timeout, 40), auto_jump_wait=10)
+    except Exception as exc:
+        if _is_driver_session_lost_error(exc):
+            raise
+        logger.warning(
+            "[Roxy注册] 密码流程后没有可用登录态，准备使用新密码重新登录：%s: %s",
+            type(exc).__name__,
+            str(exc)[:220],
+        )
+        from core.roxy_token_refresh import login_roxy_driver_with_password
+
+        return login_roxy_driver_with_password(
+            driver,
+            email,
+            password,
+            session_timeout=max(60, int(timeout)),
+        )
+
+
+def _login_roxy_driver_with_email_otp(driver, email: str, *, session_timeout: int = 90) -> dict:
+    """直接 OTP 注册完成后，在同一浏览器中重新建立 ChatGPT 登录态。"""
+    logger.info("[Roxy注册] 当前没有登录态，准备使用注册邮箱 OTP 重新登录：%s", email)
+    driver.get("https://chatgpt.com/auth/login")
+    human_delay("navigate")
+    _maybe_accept(driver)
+    otp_after_ts = time.time()
+    _type_email_address(driver, email, timeout=25)
+    human_delay("form")
+    _submit_email_step(driver)
+    next_state = _wait_email_submit_next_state(driver, email, timeout=15)
+    if next_state == "logged_in":
+        return _fetch_chatgpt_session(driver, timeout=session_timeout, auto_jump_wait=10)
+    if next_state in {"password", "login_password"}:
+        raise RuntimeError(f"注册后 OTP 重登录进入密码页，无法使用无密码账号恢复: {next_state}")
+    if next_state != "otp":
+        raise RuntimeError(f"注册后 OTP 重登录进入无法识别的状态: {next_state}")
+
+    current_otp = None
+    for attempt in range(1, 4):
+        if current_otp is None:
+            current_otp = wait_for_otp(email, after_ts=otp_after_ts)
+        _clear_otp_inputs(driver)
+        _type_otp(driver, current_otp)
+        human_delay("otp_input")
+        try:
+            _click_continue(driver)
+        except Exception:
+            pass
+        if _wait_after_email_otp_submit(driver, timeout=12) == "accepted":
+            human_delay("post_auth")
+            return _fetch_chatgpt_session(driver, timeout=session_timeout, auto_jump_wait=10)
+        if attempt >= 3:
+            break
+        otp_after_ts = time.time()
+        _click_resend_email_otp(driver, timeout=25)
+        human_delay("api")
+        current_otp = None
+    raise RuntimeError("注册后 OTP 重登录连续失败")
+
+
+def _ensure_registration_session(driver, email: str) -> dict:
+    """直接 OTP 注册分支在设置密码前必须先确认已有 ChatGPT session。"""
+    try:
+        return _fetch_chatgpt_session(driver, timeout=20, auto_jump_wait=5)
+    except Exception as exc:
+        if _is_driver_session_lost_error(exc):
+            raise
+        logger.info("[Roxy注册] 注册完成后未检测到 ChatGPT session，转为邮箱 OTP 重登录：%s", str(exc)[:220])
+        return _login_roxy_driver_with_email_otp(driver, email)
 
 
 def _check_manual_stop() -> None:
@@ -1644,19 +1837,15 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
             # 给 OAuth 回调 / session cookie 写入一点时间。
             human_delay("post_auth")
 
-        logger.info("[Roxy注册] 等待 ChatGPT 跳转并写入 session/accessToken")
-        _check_manual_stop()
-        session_info = _fetch_chatgpt_session(driver, timeout=120)
-        access_token = session_info["accessToken"]
-        logger.info("[Roxy注册] 已拿到 accessToken：%s", email)
-        _check_manual_stop()
-
         password_setup = {
             "status": "already_set" if openai_password else "skipped",
             "ok": True,
             "message": "注册阶段已设置密码" if openai_password else "配置已关闭",
         }
         if not openai_password and _password_setup_enabled():
+            # OpenAI 的直接 OTP 注册分支有时完成资料页后不会自动写入 ChatGPT
+            # session；先用刚收到的邮箱验证码重新登录，再打开安全设置补密码。
+            _ensure_registration_session(driver, email)
             try:
                 openai_password = _setup_account_password(driver, email)
                 password_setup = {"status": "success", "ok": True, "message": "安全设置密码成功"}
@@ -1667,6 +1856,18 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
                     "message": f"{type(exc).__name__}: {str(exc)[:220]}",
                 }
                 logger.warning("[Roxy注册][密码] 设置失败，仍将保存账号和 Token：%s", password_setup["message"])
+        _check_manual_stop()
+
+        # 设置密码可能刷新或替换当前登录 session；必须在密码流程完成后再读取 Token。
+        logger.info("[Roxy注册] 密码流程完成，等待 ChatGPT 跳转并写入最新 session/accessToken")
+        session_info = _fetch_session_after_password_flow(
+            driver,
+            email,
+            openai_password,
+            timeout=120,
+        )
+        access_token = session_info["accessToken"]
+        logger.info("[Roxy注册] 已拿到密码流程后的 accessToken：%s", email)
         _check_manual_stop()
 
         if _twofa_cfg.ENABLE_2FA:
