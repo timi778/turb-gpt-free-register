@@ -259,6 +259,10 @@ EDITABLE_FIELDS = [
         "label": "启用 2FA(TOTP)", "help": "注册完成后自动设置动态口令（会多收一封 OTP 邮件）",
     },
     {
+        "key": "SET_PASSWORD_AFTER_REGISTRATION", "file": "register.py", "type": "bool", "group": "功能开关",
+        "label": "注册后设置密码", "help": "OTP 注册拿到登录态后进入安全设置补设密码；如触发邮箱验证会自动再次收码",
+    },
+    {
         "key": "ENABLE_FLOW_TRIGGER", "file": "flow_trigger.py", "type": "bool", "group": "功能开关",
         "label": "启用 Flow 触发", "help": "注册成功后自动调用内部 Flow 接口（不影响注册结果）",
     },
@@ -282,6 +286,11 @@ EDITABLE_FIELDS = [
     {
         "key": "REGISTER_NAME", "file": "register.py", "type": "str", "group": "邮箱 / OTP",
         "label": "显示名称", "help": "留空则自动生成英文名",
+    },
+    {
+        "key": "REGISTER_PASSWORD", "file": "register.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "ChatGPT 固定密码", "help": "可留空；留空时为每个账号生成独立强密码",
+        "storage": "env", "secret": True,
     },
     {
         "key": "OTP_MAX_WAIT", "file": "email.py", "type": "int", "group": "邮箱 / OTP",

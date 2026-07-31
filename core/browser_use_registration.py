@@ -666,6 +666,209 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
     return None
 
 
+def _password_setup_enabled() -> bool:
+    try:
+        from config import register as _register_cfg
+        return bool(getattr(_register_cfg, "SET_PASSWORD_AFTER_REGISTRATION", True))
+    except Exception:
+        return True
+
+
+def _password_reset_state(page) -> dict:
+    try:
+        return page.evaluate(
+            r"""() => {
+              const visible = el => {
+                if (!el) return false;
+                const st = getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return st.visibility !== 'hidden' && st.display !== 'none' && r.width > 0 && r.height > 0;
+              };
+              const inputs = [...document.querySelectorAll('input')].filter(visible).map(el => ({
+                type: el.getAttribute('type') || '', name: el.getAttribute('name') || '',
+                autocomplete: el.getAttribute('autocomplete') || '', ariaInvalid: el.getAttribute('aria-invalid') || ''
+              })).slice(0, 20);
+              const errors = [...document.querySelectorAll('[role="alert"],.react-aria-FieldError,[slot="errorMessage"],[class*="error"]')]
+                .filter(visible).map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 10);
+              const passwordSetting = document.querySelector('button[data-testid="password-setting"]');
+              return {
+                url: location.href,
+                inputs,
+                errors,
+                hasPasswordSetting: visible(passwordSetting) && !passwordSetting.disabled
+                  && String(passwordSetting.getAttribute('aria-disabled') || '').toLowerCase() !== 'true'
+              };
+            }"""
+        ) or {}
+    except Exception as exc:
+        return {"url": _page_url(page), "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _has_new_password_form(page) -> bool:
+    state = _password_reset_state(page)
+    names = {str(item.get("name") or "").lower() for item in (state.get("inputs") or [])}
+    if {"new-password", "confirm-password"}.issubset(names):
+        return True
+    candidates = [
+        item for item in (state.get("inputs") or [])
+        if str(item.get("autocomplete") or "").lower() == "new-password"
+        or "password" in str(item.get("name") or "").lower()
+    ]
+    return len(candidates) >= 2
+
+
+def _wait_for_new_password_form(page, context=None, timeout: int = 35):
+    end = time.time() + timeout
+    last = {}
+    while time.time() < end:
+        page = _browser_use_heartbeat(page, context=context, label="wait-new-password")
+        if _has_new_password_form(page):
+            return page
+        last = _password_reset_state(page)
+        url = str(last.get("url") or "").lower()
+        if "/log-in" in url or "/login" in url:
+            raise RuntimeError(f"设置密码时登录态失效: {last}")
+        time.sleep(0.2 if _fast_mode() else 0.5)
+    raise RuntimeError(f"等待新密码表单超时: {last}")
+
+
+def _open_password_reset_flow(page, context=None, timeout: int = 25):
+    otp_after_ts = time.time()
+    page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded")
+    end = time.time() + timeout
+    last = {}
+    while time.time() < end:
+        page = _browser_use_heartbeat(page, context=context, label="password-settings")
+        if _is_email_verification_page(page) or _has_new_password_form(page):
+            return page, otp_after_ts
+        last = _password_reset_state(page)
+        if last.get("hasPasswordSetting"):
+            otp_after_ts = time.time()
+            if _click_first(page, ["button[data-testid='password-setting']"], timeout_ms=3000):
+                logger.info("[BrowserUse][密码] 已从安全设置点击密码入口")
+                return page, otp_after_ts
+        time.sleep(0.2 if _fast_mode() else 0.5)
+
+    logger.info("[BrowserUse][密码] 安全设置未出现密码入口，改用密码设置直达地址：state=%s", last)
+    otp_after_ts = time.time()
+    page.goto("https://auth.openai.com/reset-password/new-password", wait_until="domcontentloaded")
+    return page, otp_after_ts
+
+
+def _wait_password_otp_outcome(page, context=None, timeout: int = 15) -> tuple[str, Any]:
+    end = time.time() + timeout
+    last = {}
+    while time.time() < end:
+        page = _browser_use_heartbeat(page, context=context, label="password-otp-submit")
+        if _has_new_password_form(page):
+            return "accepted", page
+        last = _password_reset_state(page)
+        if _is_email_verification_page(page):
+            invalid = any(str(item.get("ariaInvalid") or "").lower() == "true" for item in (last.get("inputs") or []))
+            if invalid or last.get("errors"):
+                return "invalid", page
+        time.sleep(0.2 if _fast_mode() else 0.5)
+    return "unknown", page
+
+
+def _complete_password_reauth_if_needed(page, context, email: str, otp_after_ts: float):
+    end = time.time() + 35
+    while time.time() < end:
+        page = _browser_use_heartbeat(page, context=context, label="password-reauth-detect")
+        if _has_new_password_form(page):
+            return page
+        if _is_email_verification_page(page):
+            break
+        time.sleep(0.2 if _fast_mode() else 0.5)
+    else:
+        return _wait_for_new_password_form(page, context=context, timeout=1)
+
+    current_after_ts = otp_after_ts
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        logger.info("[BrowserUse][密码][OTP] 等待验证码：%s（%s/%s）", email, attempt, max_attempts)
+        code = _wait_for_otp_with_browser_heartbeat(page, context, email, after_ts=current_after_ts)
+        page = _pick_live_page(context, page) or page
+        _clear_otp_inputs(page)
+        _type_otp(page, code)
+        _bu_delay("otp_input")
+        submit_result = page.evaluate(
+            r"""() => {
+              const visible = el => {
+                if (!el) return false;
+                const st = getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return st.visibility !== 'hidden' && st.display !== 'none' && r.width > 0 && r.height > 0;
+              };
+              const otp = [...document.querySelectorAll('input')].filter(visible).find(el => {
+                const attrs = [el.type, el.name, el.id, el.autocomplete, el.inputMode, el.getAttribute('aria-label')].join(' ').toLowerCase();
+                return /one-time|otp|code|numeric|tel/.test(attrs);
+              });
+              if (!otp) return {ok:true, reason:'otp_page_already_left'};
+              const form = otp.closest('form');
+              if (!form) return {ok:false, reason:'otp_form_missing'};
+              const submit = [...form.querySelectorAll('button[type="submit"],input[type="submit"]')]
+                .find(el => visible(el) && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true');
+              if (submit) submit.click();
+              else if (typeof form.requestSubmit === 'function') form.requestSubmit();
+              else return {ok:false, reason:'otp_submit_missing'};
+              return {ok:true, reason:'otp_form_submitted'};
+            }"""
+        ) or {}
+        if not submit_result.get("ok"):
+            logger.info("[BrowserUse][密码][OTP] OTP 表单未显式提交，继续观察页面：%s", submit_result)
+        outcome, page = _wait_password_otp_outcome(page, context=context)
+        if outcome == "accepted":
+            return page
+        if attempt >= max_attempts:
+            raise RuntimeError("设置密码前的邮箱验证码连续错误/过期")
+        current_after_ts = time.time()
+        if not _click_resend_otp(page):
+            raise RuntimeError("设置密码前的邮箱验证失败，且找不到重发验证码入口")
+    raise RuntimeError("设置密码前的邮箱验证未完成")
+
+
+def _submit_new_password(page, context, password: str, timeout: int = 35):
+    if not _fill_first(page, ["input[name='new-password']"], password, timeout_ms=8000):
+        raise RuntimeError(f"找不到新密码输入框: {_password_reset_state(page)}")
+    if not _fill_first(page, ["input[name='confirm-password']"], password, timeout_ms=8000):
+        raise RuntimeError(f"找不到确认密码输入框: {_password_reset_state(page)}")
+    if not _click_first(
+        page,
+        [
+            "form[action='/reset-password/new-password'] button[type='submit']",
+            "form button[type='submit']",
+        ],
+        timeout_ms=8000,
+    ):
+        raise RuntimeError(f"找不到新密码提交按钮: {_password_reset_state(page)}")
+
+    end = time.time() + timeout
+    last = {}
+    while time.time() < end:
+        page = _browser_use_heartbeat(page, context=context, label="password-submit")
+        last = _password_reset_state(page)
+        if not _has_new_password_form(page):
+            url = str(last.get("url") or "").lower()
+            if "email-verification" not in url and "/log-in" not in url and "/login" not in url:
+                return page
+        if last.get("errors"):
+            raise RuntimeError(f"OpenAI 拒绝了新密码: {last}")
+        time.sleep(0.2 if _fast_mode() else 0.5)
+    raise RuntimeError(f"提交新密码后页面未确认成功: {last}")
+
+
+def _setup_account_password(page, context, email: str):
+    password = _registration_password()
+    logger.info("[BrowserUse][密码] 开始为账号补设密码（%s 位）：%s", len(password), email)
+    page, otp_after_ts = _open_password_reset_flow(page, context=context)
+    page = _complete_password_reauth_if_needed(page, context, email, otp_after_ts)
+    page = _wait_for_new_password_form(page, context=context)
+    page = _submit_new_password(page, context, password)
+    logger.info("[BrowserUse][密码] 账号密码设置成功：%s", email)
+    return page, password
+
+
 def _type_otp(page, code: str) -> None:
     code = str(code or "").strip()
     if not code:
@@ -1851,6 +2054,24 @@ def run_browser_use_registration(
             create_acknowledged = True
             logger.info("[BrowserUse] 已拿到 accessToken：%s", email)
 
+            password_setup = {
+                "status": "already_set" if openai_password else "skipped",
+                "ok": True,
+                "message": "注册阶段已设置密码" if openai_password else "配置已关闭",
+            }
+            if not openai_password and _password_setup_enabled():
+                try:
+                    page, openai_password = _setup_account_password(page, context, email)
+                    password_setup = {"status": "success", "ok": True, "message": "安全设置密码成功"}
+                except Exception as exc:
+                    password_setup = {
+                        "status": "failed",
+                        "ok": False,
+                        "message": f"{type(exc).__name__}: {str(exc)[:220]}",
+                    }
+                    logger.warning("[BrowserUse][密码] 设置失败，仍将保存账号和 Token：%s", password_setup["message"])
+            _check_manual_stop()
+
             if _twofa_cfg.ENABLE_2FA:
                 logger.warning("[BrowserUse] 当前路径暂不自动设置 2FA，已跳过")
             totp_secret = None
@@ -1911,18 +2132,22 @@ def run_browser_use_registration(
                         "connect": session_info_open.raw,
                     },
                     "registration_password": openai_password,
+                    "password_setup": password_setup,
                     "codex": codex_result,
                 },
             )
-            _t_all.done("success")
+            password_ok = bool(password_setup.get("ok"))
+            _t_all.done("success" if password_ok else "password_setup=failed")
             return {
-                "success": True,
+                "success": password_ok,
                 "email": email,
                 "account_id": account_id,
                 "access_token": access_token,
                 "totp_secret": totp_secret,
+                "registration_password": openai_password,
+                "password_setup": password_setup,
                 "codex": codex_result,
-                "error": None,
+                "error": None if password_ok else f"账号密码未设置: {password_setup.get('message')}",
             }
     except Exception as exc:
         logger.error("[BrowserUse] 注册失败：%s: %s", type(exc).__name__, exc)

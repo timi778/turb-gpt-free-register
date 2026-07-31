@@ -319,7 +319,7 @@ def _render_static_viewer(outlook_rows: list[dict] | None = None, account_rows: 
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>ID</th><th>邮箱</th><th>来源</th><th>Token</th><th>备注</th><th>2FA</th><th>创建时间</th><th>操作</th></tr></thead>
+        <thead><tr><th>ID</th><th>邮箱</th><th>来源</th><th>Token</th><th>账号密码</th><th>备注</th><th>2FA</th><th>创建时间</th><th>操作</th></tr></thead>
         <tbody id="accountsBody"></tbody>
       </table>
     </div>
@@ -410,10 +410,11 @@ function render() {{
       <td><div class="main-cell">${{esc(r.email)}}</div><div class="sub-cell">${{esc(r.user_name || '-')}}</div></td>
       <td>${{esc(r.email_source || '-')}}</td>
       <td><span class="mono">${{esc(short(r.access_token || '', 42))}}</span></td>
+      <td><span class="mono">${{r.registration_password ? '******' : '<span class="muted">-</span>'}}</span></td>
       <td title="${{esc(r.note || '')}}">${{r.note ? esc(short(r.note, 60)) : '<span class="muted">-</span>'}}</td>
       <td>${{r.totp_secret ? '已启用' : '<span class="muted">未启用</span>'}}</td>
       <td class="muted">${{esc(r.created_at || '-')}}</td>
-      <td class="actions">${{btn('复制Token', r.access_token, 'primary')}} ${{btn('复制整行', r.copy_line, 'good')}}</td>
+      <td class="actions">${{btn('复制Token', r.access_token, 'primary')}} ${{btn('复制密码', r.registration_password)}} ${{btn('复制整行', r.copy_line, 'good')}}</td>
     </tr>`).join('');
   $('#outlookBody').innerHTML = outlook.map((r) => `
     <tr>
@@ -532,6 +533,15 @@ def _find_by_email(rows: list[dict], email: str) -> dict | None:
 
 def _decorate_account(row: dict, group_by_id: dict[int, str] | None = None) -> dict:
     out = dict(row)
+    if not out.get("registration_password") and out.get("extra_json"):
+        try:
+            extra = json.loads(out["extra_json"])
+            if isinstance(extra, dict):
+                out["registration_password"] = extra.get("registration_password") or ""
+        except (TypeError, ValueError, json.JSONDecodeError):
+            out["registration_password"] = ""
+    else:
+        out["registration_password"] = out.get("registration_password") or ""
     try:
         group_id = int(out.get("group_id") or 0)
     except (TypeError, ValueError):
@@ -759,6 +769,7 @@ def insert_account(
     device_id: str | None = None,
     proxy_used: str | None = None,
     email_source: str | None = None,
+    registration_password: str | None = None,
     extra: dict | None = None,
     codex_status: str | None = None,   # success / failed / skipped / missing
     codex_error: str | None = None,    # 失败原因（仅 codex_status=failed 时有意义）
@@ -793,6 +804,7 @@ def insert_account(
             "device_id": device_id if device_id is not None else row.get("device_id"),
             "proxy_used": proxy_used if proxy_used is not None else row.get("proxy_used"),
             "email_source": email_source if email_source is not None else row.get("email_source"),
+            "registration_password": registration_password if registration_password is not None else row.get("registration_password"),
             "extra_json": extra_json if extra_json is not None else row.get("extra_json"),
             "codex_status": codex_status if codex_status is not None else row.get("codex_status"),
             "codex_error": codex_error if codex_error is not None else row.get("codex_error"),

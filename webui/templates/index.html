@@ -138,8 +138,8 @@
     .accounts-table .col-token { width: 92px; }
     .accounts-table .col-plan { width: 340px; }
     .accounts-table .col-note { width: 180px; }
-    .accounts-table .col-actions { width: 410px; }
-    .accounts-table td:nth-child(6), .accounts-table th:nth-child(6) { overflow: visible; text-overflow: clip; }
+    .accounts-table .col-actions { width: 460px; }
+    .accounts-table td:nth-child(7), .accounts-table th:nth-child(7) { overflow: visible; text-overflow: clip; }
     .outlook-table .col-actions { width: 220px; }
     .codex-table .col-actions { width: 260px; }
     th { position: sticky; top: 0; background: #fbfcfe; color: #475467; z-index: 1; font-size: 12px; }
@@ -426,10 +426,10 @@
       </div>
       <div class="table-wrap">
         <table class="accounts-table">
-          <colgroup><col class="col-check"><col class="col-id"><col class="col-email"><col class="col-source"><col class="col-token"><col class="col-plan"><col class="col-note"><col class="col-small"><col class="col-status"><col class="col-time"><col class="col-actions"></colgroup>
+          <colgroup><col class="col-check"><col class="col-id"><col class="col-email"><col class="col-source"><col class="col-token"><col class="col-token"><col class="col-plan"><col class="col-note"><col class="col-small"><col class="col-status"><col class="col-time"><col class="col-actions"></colgroup>
           <thead><tr>
             <th><input type="checkbox" id="accountsSelectAll" title="全选/取消全选当前页账号"></th>
-            <th>ID</th><th>邮箱</th><th>来源</th><th>Token</th><th>套餐</th><th>备注</th><th>2FA</th><th>Codex</th><th>创建时间</th><th>操作</th>
+            <th>ID</th><th>邮箱</th><th>来源</th><th>Token</th><th>账号密码</th><th>套餐</th><th>备注</th><th>2FA</th><th>Codex</th><th>创建时间</th><th>操作</th>
           </tr></thead>
           <tbody id="accountsBody"></tbody>
         </table>
@@ -1425,13 +1425,14 @@ function renderAccounts() {
       <td><div class="main-cell">${esc(r.email)}</div><div class="sub-cell">${esc(r.user_name || '-')}</div></td>
       <td>${esc(r.email_source || '-')}</td>
       <td><span class="mono" title="${esc(r.access_token || '')}">${esc(short(r.access_token || '', 10))}</span></td>
+      <td><span class="mono" title="${r.registration_password ? '密码已保存' : '未设置或设置失败'}">${r.registration_password ? '******' : '<span class="muted">-</span>'}</span></td>
       <td>${_planCell(r)}<div class="sub-cell">${_extractLinkCell(r)}</div></td>
       <td class="wrap" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="muted">-</span>'}</td>
       <td>${r.totp_secret ? '已启用' : '<span class="muted">未启用</span>'}</td>
       <td>${_codexCell(r)}</td>
       <td class="muted">${esc(r.created_at || '-')}</td>
-      <td class="actions">${cbtn('复制Token', r.access_token, 'primary')} ${cbtn('复制整行', r.copy_line, 'good')} <button data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button> ${_planAction(r)} ${_extractLinkAction(r)} ${_codexAction(r)} <button data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button> <button class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button></td>
-    </tr>`).join('') || '<tr><td colspan="11" class="muted">暂无账号</td></tr>';
+      <td class="actions">${cbtn('复制Token', r.access_token, 'primary')} ${cbtn('复制密码', r.registration_password)} ${cbtn('复制整行', r.copy_line, 'good')} <button data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button> ${_planAction(r)} ${_extractLinkAction(r)} ${_codexAction(r)} <button data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button> <button class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button></td>
+    </tr>`).join('') || '<tr><td colspan="12" class="muted">暂无账号</td></tr>';
   updateAccountSelectionUi(rows);
   _renderPager('accounts', total);
 }
@@ -2456,7 +2457,7 @@ function configSubhead(title, help = '') {
 }
 
 function emailConfigSectionForKey(key) {
-  if (['USE_EMAIL_SERVICE','REGISTER_EMAIL','REGISTER_NAME','OTP_MAX_WAIT','OTP_POLL_INTERVAL','EMAIL_SOURCE'].includes(key)) {
+  if (['USE_EMAIL_SERVICE','REGISTER_EMAIL','REGISTER_NAME','REGISTER_PASSWORD','OTP_MAX_WAIT','OTP_POLL_INTERVAL','EMAIL_SOURCE'].includes(key)) {
     return ['通用邮箱 / OTP', '邮箱来源选择、OTP 等待参数、手动邮箱等通用设置'];
   }
   if (key.startsWith('GPTMAIL_')) return ['GPTMail', 'GPTMail 临时邮箱 API 配置'];

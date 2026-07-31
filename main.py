@@ -170,11 +170,14 @@ def run_registration(
     batch_dir=None,
 ):
     """
-    执行完整的 ChatGPT 注册流程（OTP-only，无密码）。
+    执行完整的 ChatGPT 协议注册流程。
 
     OpenAI 当前默认流程：signin 时携带 login_hint+screen_hint=login_or_signup
     → follow_authorize 重定向链自动落到 /email-verification 并触发 OTP 发送
     → 用户输入验证码 → validate_email_otp → about-you 提交昵称生日 → 完成。
+
+    注意：纯协议驱动无法操作 ChatGPT 安全设置页；开启注册后设置密码时，
+    账号和 Token 仍会保存，但任务会明确标记密码阶段未完成。请使用浏览器驱动补设密码。
 
     Args:
         email: 注册邮箱
@@ -443,6 +446,21 @@ def run_registration(
                 )
             human_delay("post_auth")
 
+        # 纯协议会话无法执行 ChatGPT 安全设置中的浏览器交互；账号仍保存，任务明确标出密码阶段未完成。
+        from config import register as _register_cfg
+        password_required = bool(getattr(_register_cfg, "SET_PASSWORD_AFTER_REGISTRATION", True))
+        openai_password = None
+        password_setup = {
+            "status": "unsupported" if password_required else "skipped",
+            "ok": not password_required,
+            "message": (
+                "protocol 注册驱动不支持安全设置页面，请改用 roxy/cloak/browser_use/skyvern"
+                if password_required else "配置已关闭"
+            ),
+        }
+        if password_required:
+            logger.warning("[密码] %s；仍将保存账号和 Token", password_setup["message"])
+
         # ==================== 阶段7: 设置 2FA（受 config.ENABLE_2FA 控制）====================
         totp_secret = None
         if _twofa_cfg.ENABLE_2FA:
@@ -501,6 +519,8 @@ def run_registration(
                 "device_id": session.device_id,
                 "sentinel_sid": getattr(session, "sentinel_sid", None),
                 "browser_profile": getattr(session, "browser_profile", None),
+                "registration_password": openai_password,
+                "password_setup": password_setup,
                 "codex": codex_result,
             },
         )
@@ -536,14 +556,20 @@ def run_registration(
         # Codex 失败时账号仍保存（token 拿到了、有补跑机会），但任务状态标失败，
         # 让 WebUI 任务表能清楚区分"完整成功"和"差 Codex"两种结果。
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
-        task_success = codex_ok
-        task_error = None
+        password_ok = bool(password_setup.get("ok"))
+        task_success = codex_ok and password_ok
+        errors = []
+        if not password_ok:
+            errors.append(f"账号密码未设置: {password_setup.get('message', '未知')}")
+        if not codex_ok:
+            errors.append(f"Codex 未完成: {codex_result.get('message', '未知')}")
+        task_error = "; ".join(errors) or None
         if not task_success:
-            task_error = f"Codex 未完成: {codex_result.get('message', '未知')}"
             logger.warning(f"[任务结果] {email} 账号已保存但任务标失败，原因: {task_error}")
 
         return {"success": task_success, "email": email, "account_id": account_id,
                 "access_token": access_token, "totp_secret": totp_secret,
+                "registration_password": openai_password, "password_setup": password_setup,
                 "flow": flow_result, "codex": codex_result,
                 "error": task_error}
 

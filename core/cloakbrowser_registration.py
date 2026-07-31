@@ -18,6 +18,7 @@ from core.roxy_registration import (  # noqa: F401
     _maybe_accept, _submit_email_and_wait_next, _fill_password_page_if_present,
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
+    _password_setup_enabled, _setup_account_password,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,19 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
         access_token = session_info["accessToken"]
         logger.info("[Cloak注册] 已拿到 accessToken：%s", email)
 
+        password_setup = {
+            "status": "already_set" if openai_password else "skipped",
+            "ok": True,
+            "message": "注册阶段已设置密码" if openai_password else "配置已关闭",
+        }
+        if not openai_password and _password_setup_enabled():
+            try:
+                openai_password = _setup_account_password(driver, email)
+                password_setup = {"status": "success", "ok": True, "message": "安全设置密码成功"}
+            except Exception as exc:
+                password_setup = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {str(exc)[:220]}"}
+                logger.warning("[Cloak注册][密码] 设置失败，仍将保存账号和 Token：%s", password_setup["message"])
+
         if _twofa_cfg.ENABLE_2FA:
             logger.warning("[Cloak注册] 当前 CloakBrowser 自动化路径暂不执行 2FA 设置，已跳过")
         totp_secret = None
@@ -137,11 +151,18 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
                 "expires": session_info.get("expires"),
                 "cloakbrowser": {"profile_id": opened.profile_id, "open_result": opened.raw},
                 "registration_password": openai_password,
+                "password_setup": password_setup,
                 "codex": codex_result,
             },
         )
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
-        return {"success": bool(codex_ok), "email": email, "account_id": account_id, "access_token": access_token, "totp_secret": totp_secret, "codex": codex_result, "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}"}
+        password_ok = bool(password_setup.get("ok"))
+        errors = []
+        if not password_ok:
+            errors.append(f"账号密码未设置: {password_setup.get('message')}")
+        if not codex_ok:
+            errors.append(f"Codex 未完成: {codex_result.get('message')}")
+        return {"success": bool(codex_ok and password_ok), "email": email, "account_id": account_id, "access_token": access_token, "totp_secret": totp_secret, "registration_password": openai_password, "password_setup": password_setup, "codex": codex_result, "error": "; ".join(errors) or None}
     except Exception as exc:
         logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Cloak注册] 失败详情", exc_info=True)

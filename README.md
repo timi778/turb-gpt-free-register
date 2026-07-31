@@ -524,13 +524,20 @@ python tools/test_codex_oauth.py --email <已注册邮箱> --verbose
 
 ## 注册密码说明
 
-Roxy 注册如果遇到新版流程：
+`roxy`、`cloak`、`browser_use`、`skyvern` 注册驱动支持完整的账号密码设置：
 
 ```text
-/create-account/password
+注册阶段遇到 /create-account/password
+  → 当场设置密码并继续注册
+
+OTP-only 注册拿到 accessToken
+  → 打开 https://chatgpt.com/#settings/Security
+  → 点击 data-testid=password-setting
+  → 如进入 /email-verification，再自动收取并提交一封邮箱 OTP
+  → 在 /reset-password/new-password 填写并确认密码
 ```
 
-会自动设置密码。
+默认由 `SET_PASSWORD_AFTER_REGISTRATION=True` 开启。纯 `protocol` 驱动不具备页面交互能力；开启该选项时仍会保存已创建账号和 Token，但任务会明确标记密码阶段未完成。
 
 密码来源：
 
@@ -544,10 +551,11 @@ REGISTER_PASSWORD = "你的固定密码"
 
 保存位置：
 
+- 账号顶层字段 `registration_password`（WebUI「账号」页显示为掩码，可点击“复制密码”）
 - 账号 `extra_json.registration_password`
 - 批次归档 `accounts/YYYYMMDD-.../注册成功账号.json` 的 `extra.registration_password`
 
-注意：账号表里的 `password` 字段仍用于 Outlook 邮箱素材密码，不会被 OpenAI 注册密码覆盖。
+注意：账号表里的 `password` 字段仍用于 Outlook 邮箱素材密码，不会被 ChatGPT 账号密码覆盖。密码设置失败时账号与 Token 仍会保存，任务状态会标记失败并记录 `extra_json.password_setup` 错误。
 
 ---
 
@@ -620,6 +628,8 @@ accounts/20260709-10个-3线程/
 如进入 about-you/profile：填写姓名 + 年龄或生日
   ↓
 进入 ChatGPT，读取 /api/auth/session accessToken
+  ↓
+如注册阶段尚未设置密码：打开安全设置补设密码（可能再次验证邮箱 OTP）
   ↓
 可选 2FA
   ↓

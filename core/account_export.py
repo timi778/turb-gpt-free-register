@@ -415,6 +415,7 @@ def save_account_data(
         device_id=extra.get("device_id"),
         proxy_used=proxy_used,
         email_source=email_source,
+        registration_password=extra.get("registration_password"),
         extra=extra,
         codex_status=codex_status,
         codex_error=codex_error,

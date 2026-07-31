@@ -1102,6 +1102,206 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
     return None
 
 
+def _password_setup_enabled() -> bool:
+    try:
+        from config import register as _register_cfg
+        return bool(getattr(_register_cfg, "SET_PASSWORD_AFTER_REGISTRATION", True))
+    except Exception:
+        return True
+
+
+def _password_reset_page_state(driver) -> dict:
+    try:
+        return driver.execute_script(r"""
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const inputs = [...document.querySelectorAll('input')].filter(visible).map(el => ({
+          type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
+          autocomplete: el.getAttribute('autocomplete') || '', ariaInvalid: el.getAttribute('aria-invalid') || ''
+        })).slice(0, 20);
+        const errors = [...document.querySelectorAll('[role="alert"],.react-aria-FieldError,[slot="errorMessage"],[class*="error"]')]
+          .filter(visible).map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 10);
+        const passwordSetting = document.querySelector('button[data-testid="password-setting"]');
+        return {
+          url: location.href,
+          inputs,
+          errors,
+          hasPasswordSetting: visible(passwordSetting) && !passwordSetting.disabled
+            && String(passwordSetting.getAttribute('aria-disabled') || '').toLowerCase() !== 'true'
+        };
+        """) or {}
+    except Exception as exc:
+        return {"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _has_new_password_form(driver) -> bool:
+    state = _password_reset_page_state(driver)
+    names = {str(item.get("name") or "").lower() for item in (state.get("inputs") or [])}
+    if {"new-password", "confirm-password"}.issubset(names):
+        return True
+    new_password_inputs = [
+        item for item in (state.get("inputs") or [])
+        if str(item.get("autocomplete") or "").lower() == "new-password"
+        or "password" in str(item.get("name") or "").lower()
+    ]
+    return len(new_password_inputs) >= 2
+
+
+def _wait_for_new_password_form(driver, timeout: int = 35) -> None:
+    end = time.time() + timeout
+    last = {}
+    while time.time() < end:
+        if _has_new_password_form(driver):
+            return
+        last = _password_reset_page_state(driver)
+        url = str(last.get("url") or "").lower()
+        if "/log-in" in url or "/login" in url:
+            raise RuntimeError(f"设置密码时登录态失效: {last}")
+        time.sleep(0.5)
+    raise RuntimeError(f"等待新密码表单超时: {last}")
+
+
+def _open_password_reset_flow(driver, timeout: int = 25) -> float:
+    """从 ChatGPT 安全设置进入密码重置页，返回触发二次 OTP 前的时间戳。"""
+    otp_after_ts = time.time()
+    driver.get("https://chatgpt.com/#settings/Security")
+    end = time.time() + timeout
+    last = {}
+    while time.time() < end:
+        if _is_email_verification_page(driver) or _has_new_password_form(driver):
+            return otp_after_ts
+        last = _password_reset_page_state(driver)
+        if last.get("hasPasswordSetting"):
+            otp_after_ts = time.time()
+            clicked = driver.execute_script(r"""
+            const button = document.querySelector('button[data-testid="password-setting"]');
+            if (!button || button.disabled || String(button.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
+            button.scrollIntoView({block:'center'});
+            button.click();
+            return true;
+            """)
+            if clicked:
+                logger.info("[Roxy注册][密码] 已从安全设置点击密码入口")
+                return otp_after_ts
+        time.sleep(0.5)
+
+    logger.info("[Roxy注册][密码] 安全设置未出现密码入口，改用密码设置直达地址：state=%s", last)
+    otp_after_ts = time.time()
+    driver.get("https://auth.openai.com/reset-password/new-password")
+    return otp_after_ts
+
+
+def _complete_password_reauth_if_needed(driver, email: str, otp_after_ts: float) -> None:
+    end = time.time() + 35
+    while time.time() < end:
+        if _has_new_password_form(driver):
+            return
+        if _is_email_verification_page(driver):
+            break
+        time.sleep(0.5)
+    else:
+        _wait_for_new_password_form(driver, timeout=1)
+        return
+
+    max_attempts = 3
+    current_after_ts = otp_after_ts
+    for attempt in range(1, max_attempts + 1):
+        logger.info("[Roxy注册][密码][OTP] 等待验证码：%s（%s/%s）", email, attempt, max_attempts)
+        code = wait_for_otp(email, after_ts=current_after_ts)
+        _clear_otp_inputs(driver)
+        _type_otp(driver, code)
+        human_delay("otp_input")
+        submit_result = driver.execute_script(r"""
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const otp = [...document.querySelectorAll('input')].filter(visible).find(el => {
+          const attrs = [el.type, el.name, el.id, el.autocomplete, el.inputMode, el.getAttribute('aria-label')].join(' ').toLowerCase();
+          return /one-time|otp|code|numeric|tel/.test(attrs);
+        });
+        if (!otp) return {ok:true, reason:'otp_page_already_left'};
+        const form = otp.closest('form');
+        if (!form) return {ok:false, reason:'otp_form_missing'};
+        const submit = [...form.querySelectorAll('button[type="submit"],input[type="submit"]')]
+          .find(el => visible(el) && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true');
+        if (submit) submit.click();
+        else if (typeof form.requestSubmit === 'function') form.requestSubmit();
+        else return {ok:false, reason:'otp_submit_missing'};
+        return {ok:true, reason:'otp_form_submitted'};
+        """) or {}
+        if not submit_result.get("ok"):
+            logger.info("[Roxy注册][密码][OTP] OTP 表单未显式提交，继续观察页面：%s", submit_result)
+
+        outcome = _wait_after_email_otp_submit(driver, timeout=12)
+        if outcome == "accepted":
+            _wait_for_new_password_form(driver, timeout=35)
+            return
+        if attempt >= max_attempts:
+            raise RuntimeError("设置密码前的邮箱验证码连续错误/过期")
+        current_after_ts = time.time()
+        _click_resend_email_otp(driver, timeout=25)
+    raise RuntimeError("设置密码前的邮箱验证未完成")
+
+
+def _submit_new_password(driver, password: str, timeout: int = 35) -> None:
+    result = driver.execute_script(r"""
+    const password = String(arguments[0]);
+    const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+      && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+      && !el.disabled && !el.readOnly;
+    const setValue = (el, value) => {
+      el.scrollIntoView({block:'center'});
+      el.focus();
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(el, value); else el.value = value;
+      el.dispatchEvent(new Event('input', {bubbles:true}));
+      el.dispatchEvent(new Event('change', {bubbles:true}));
+      el.blur();
+    };
+    const inputs = [...document.querySelectorAll('input')].filter(visible);
+    const first = inputs.find(el => String(el.name || '').toLowerCase() === 'new-password')
+      || inputs.find(el => String(el.autocomplete || '').toLowerCase() === 'new-password');
+    const confirm = inputs.find(el => String(el.name || '').toLowerCase() === 'confirm-password')
+      || inputs.filter(el => String(el.autocomplete || '').toLowerCase() === 'new-password').find(el => el !== first);
+    if (!first || !confirm || first === confirm) return {ok:false, reason:'missing_password_inputs'};
+    setValue(first, password);
+    setValue(confirm, password);
+    const form = first.closest('form') || confirm.closest('form');
+    if (!form) return {ok:false, reason:'missing_form'};
+    const submit = [...form.querySelectorAll('button[type="submit"],input[type="submit"]')]
+      .find(el => visible(el) && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true');
+    if (typeof form.requestSubmit === 'function') form.requestSubmit(submit || undefined);
+    else if (submit) submit.click();
+    else form.submit();
+    return {ok:true};
+    """, password) or {}
+    if not result.get("ok"):
+        raise RuntimeError(f"填写新密码表单失败: {result}, state={_password_reset_page_state(driver)}")
+
+    end = time.time() + timeout
+    last = {}
+    while time.time() < end:
+        time.sleep(0.5)
+        last = _password_reset_page_state(driver)
+        if not _has_new_password_form(driver):
+            url = str(last.get("url") or "").lower()
+            if "email-verification" not in url and "/log-in" not in url and "/login" not in url:
+                return
+        if last.get("errors"):
+            raise RuntimeError(f"OpenAI 拒绝了新密码: {last}")
+    raise RuntimeError(f"提交新密码后页面未确认成功: {last}")
+
+
+def _setup_account_password(driver, email: str) -> str:
+    password = _registration_password()
+    logger.info("[Roxy注册][密码] 开始为账号补设密码（%s 位）：%s", len(password), email)
+    otp_after_ts = _open_password_reset_flow(driver)
+    _complete_password_reauth_if_needed(driver, email, otp_after_ts)
+    _wait_for_new_password_form(driver)
+    _submit_new_password(driver, password)
+    logger.info("[Roxy注册][密码] 账号密码设置成功：%s", email)
+    return password
+
+
 def _accept_profile_consents(driver) -> int:
     """about-you/profile 下出现韩国/日本个人信息同意协议时，默认全部勾选。
 
@@ -1451,6 +1651,24 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
         logger.info("[Roxy注册] 已拿到 accessToken：%s", email)
         _check_manual_stop()
 
+        password_setup = {
+            "status": "already_set" if openai_password else "skipped",
+            "ok": True,
+            "message": "注册阶段已设置密码" if openai_password else "配置已关闭",
+        }
+        if not openai_password and _password_setup_enabled():
+            try:
+                openai_password = _setup_account_password(driver, email)
+                password_setup = {"status": "success", "ok": True, "message": "安全设置密码成功"}
+            except Exception as exc:
+                password_setup = {
+                    "status": "failed",
+                    "ok": False,
+                    "message": f"{type(exc).__name__}: {str(exc)[:220]}",
+                }
+                logger.warning("[Roxy注册][密码] 设置失败，仍将保存账号和 Token：%s", password_setup["message"])
+        _check_manual_stop()
+
         if _twofa_cfg.ENABLE_2FA:
             logger.warning("[Roxy注册] 当前 Roxy 自动化路径暂不执行 2FA 设置，已跳过")
         totp_secret = None
@@ -1494,18 +1712,27 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
                 "expires": session_info.get("expires"),
                 "roxybrowser": {"profile_id": opened.profile_id, "open_result": opened.raw},
                 "registration_password": openai_password,
+                "password_setup": password_setup,
                 "codex": codex_result,
             },
         )
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
+        password_ok = bool(password_setup.get("ok"))
+        errors = []
+        if not password_ok:
+            errors.append(f"账号密码未设置: {password_setup.get('message')}")
+        if not codex_ok:
+            errors.append(f"Codex 未完成: {codex_result.get('message')}")
         return {
-            "success": bool(codex_ok),
+            "success": bool(codex_ok and password_ok),
             "email": email,
             "account_id": account_id,
             "access_token": access_token,
             "totp_secret": totp_secret,
+            "registration_password": openai_password,
+            "password_setup": password_setup,
             "codex": codex_result,
-            "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}",
+            "error": "; ".join(errors) or None,
         }
     except Exception as exc:
         logger.error("[Roxy注册] 失败：%s: %s", type(exc).__name__, exc)
