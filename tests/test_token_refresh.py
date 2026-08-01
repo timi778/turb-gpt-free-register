@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 import json
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -90,6 +93,80 @@ class TokenRefreshTests(unittest.TestCase):
                 self.assertTrue(result["ok"])
                 self.assertEqual(db.get_account(account_id)["access_token"], "worker-new-token")
         self.assertNotIn("password", result)
+
+    def test_roxy_busy_create_is_retried_for_token_refresh_only(self):
+        client = Mock()
+        opened = SimpleNamespace(profile_id="profile-test")
+        driver = Mock()
+        client.open_profile.side_effect = [
+            RuntimeError("Roxy API 返回失败 POST /browser/create: 正在创建中，请稍等！"),
+            opened,
+        ]
+
+        with patch.object(roxy_token_refresh, "_build_driver", return_value=driver), \
+             patch.object(roxy_token_refresh, "_center_browser_window"), \
+             patch.object(roxy_token_refresh.time, "sleep") as sleep:
+            actual_opened, actual_driver = roxy_token_refresh._open_token_refresh_browser(client)
+
+        self.assertIs(actual_opened, opened)
+        self.assertIs(actual_driver, driver)
+        self.assertEqual(client.open_profile.call_count, 2)
+        sleep.assert_called_once_with(1.5)
+
+    def test_parallel_token_refresh_profile_opens_are_serialized(self):
+        state_lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        class Client:
+            def open_profile(self):
+                nonlocal active, max_active
+                with state_lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.04)
+                with state_lock:
+                    active -= 1
+                return SimpleNamespace(profile_id=f"profile-{id(self)}")
+
+            def cleanup_profile(self, _opened):
+                return None
+
+        with patch.object(roxy_token_refresh, "_build_driver", side_effect=lambda _opened: Mock()), \
+             patch.object(roxy_token_refresh, "_center_browser_window"):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(
+                    roxy_token_refresh._open_token_refresh_browser,
+                    [Client(), Client()],
+                ))
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(max_active, 1)
+
+    def test_closed_auth_window_switches_and_retries_password_login(self):
+        driver = Mock()
+        driver.get.side_effect = [
+            RuntimeError("no such window: target window already closed; web view not found"),
+            None,
+        ]
+        driver.window_handles = ["surviving-tab"]
+        driver.current_url = "https://chatgpt.com/auth/login"
+
+        with patch.object(roxy_token_refresh, "_maybe_accept"), \
+             patch.object(roxy_token_refresh, "_type_email_address"), \
+             patch.object(roxy_token_refresh, "_submit_email_step"), \
+             patch.object(roxy_token_refresh, "_wait_email_submit_next_state", return_value="logged_in"), \
+             patch.object(roxy_token_refresh, "_fetch_chatgpt_session", return_value={"accessToken": "new-token"}), \
+             patch.object(roxy_token_refresh, "human_delay"):
+            result = roxy_token_refresh.login_roxy_driver_with_password(
+                driver,
+                "login@example.test",
+                "Saved-Pass-123!",
+            )
+
+        self.assertEqual(result["accessToken"], "new-token")
+        self.assertEqual(driver.get.call_count, 2)
+        driver.switch_to.window.assert_called_once_with("surviving-tab")
 
     def test_initial_email_verification_switches_to_password_without_fetching_otp(self):
         driver = Mock()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from urllib.parse import urljoin, urlparse
 
@@ -29,6 +30,98 @@ from core.roxy_registration import (
 from core.roxybrowser_client import RoxyBrowserClient
 
 logger = logging.getLogger(__name__)
+
+# Roxy 的本地控制面无法同时处理多个 create/open/close/delete 请求，但已经
+# 打开的浏览器可以并行执行页面自动化。该锁仅属于 Token 更新流程，不参与注册。
+_TOKEN_REFRESH_ROXY_CONTROL_LOCK = threading.Lock()
+
+
+def _is_roxy_control_busy_error(exc: Exception | str) -> bool:
+    text = str(exc or "").lower()
+    return any(marker in text for marker in (
+        "正在创建中",
+        "请稍等",
+        "creation in progress",
+        "already creating",
+        "browser is being created",
+    ))
+
+
+def _is_closed_window_error(exc: Exception | str) -> bool:
+    text = str(exc or "").lower()
+    return any(marker in text for marker in (
+        "no such window",
+        "target window already closed",
+        "web view not found",
+        "当前 cloakbrowser 页面已关闭",
+    ))
+
+
+def _open_token_refresh_browser(client, max_attempts: int = 4):
+    """串行执行 Roxy 控制面操作，返回独立的 (profile, driver)。"""
+    last_exc: Exception | None = None
+    for attempt in range(1, max(1, int(max_attempts)) + 1):
+        opened = None
+        with _TOKEN_REFRESH_ROXY_CONTROL_LOCK:
+            try:
+                opened = client.open_profile()
+                driver = _build_driver(opened)
+                _center_browser_window(driver)
+                driver.set_page_load_timeout(int(_cfg.ROXY_SELENIUM_TIMEOUT))
+                return opened, driver
+            except Exception as exc:
+                last_exc = exc
+                if opened is not None:
+                    try:
+                        client.cleanup_profile(opened)
+                    except Exception:
+                        pass
+        if not _is_roxy_control_busy_error(last_exc) or attempt >= max_attempts:
+            raise last_exc
+        delay = min(6.0, 1.5 * attempt)
+        logger.warning(
+            "[Token刷新] Roxy 正在处理另一个环境，%.1fs 后重试创建（%s/%s）",
+            delay,
+            attempt + 1,
+            max_attempts,
+        )
+        time.sleep(delay)
+    raise last_exc or RuntimeError("Roxy Token 更新环境创建失败")
+
+
+def _cleanup_token_refresh_browser(client, opened, driver) -> None:
+    """清理也经过同一控制面锁，避免关闭环境与另一个 create/open 交叉。"""
+    with _TOKEN_REFRESH_ROXY_CONTROL_LOCK:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        if opened is not None:
+            client.cleanup_profile(opened)
+
+
+def _activate_surviving_window(driver) -> bool:
+    """认证回调关闭当前标签页时，切换到仍存活的标签页。"""
+    try:
+        handles = list(driver.window_handles or [])
+    except Exception:
+        handles = []
+    for handle in reversed(handles):
+        try:
+            driver.switch_to.window(handle)
+            _ = driver.current_url
+            logger.info("[Token刷新] 当前认证标签页已关闭，已切换到存活标签页")
+            return True
+        except Exception:
+            continue
+    try:
+        driver.switch_to.new_window("tab")
+        _ = driver.current_url
+        logger.info("[Token刷新] 当前认证标签页已关闭，已新建标签页继续登录")
+        return True
+    except Exception:
+        return False
 
 
 def _auth_page_state(driver) -> dict:
@@ -296,42 +389,49 @@ def login_roxy_driver_with_password(
     session_timeout: int = 100,
 ) -> dict:
     """在已有 Roxy/Cloak driver 中用密码登录并返回最新 ChatGPT session。"""
-    driver.get("https://chatgpt.com/auth/login")
-    human_delay("navigate")
-    _maybe_accept(driver)
+    for window_attempt in range(1, 3):
+        try:
+            driver.get("https://chatgpt.com/auth/login")
+            human_delay("navigate")
+            _maybe_accept(driver)
 
-    _type_email_address(driver, email, timeout=25)
-    human_delay("form")
-    _submit_email_step(driver)
-    password_submitted_at = None
-    next_state = _wait_email_submit_next_state(driver, email, timeout=15)
-    if next_state == "password":
-        raise RuntimeError("邮箱进入注册密码页，拒绝执行注册流程")
-    if next_state == "otp":
-        next_state = _switch_email_verification_to_password(driver)
-    if next_state == "login_password":
-        for password_attempt in range(1, 3):
-            password_submitted_at = time.time()
-            _fill_login_password(driver, password)
-            next_state = _wait_after_password_submit(driver)
-            if next_state != "transient_error":
-                break
-            if password_attempt >= 2:
-                raise RuntimeError("密码登录连续两次遇到 auth.openai.com 临时错误页")
-            logger.info("[Token刷新] 准备从认证站点临时错误页恢复并重试密码登录")
-            _recover_from_transient_auth_error(driver)
-    if next_state == "otp":
-        if password_submitted_at is None:
-            raise RuntimeError("未提交密码却进入邮箱验证码分支，已停止以避免验证码优先登录")
-        _complete_email_otp(driver, email, password_submitted_at)
-    elif next_state not in {"logged_in", "login_password"}:
-        raise RuntimeError(f"邮箱提交后进入了无法识别的状态: {next_state}")
+            _type_email_address(driver, email, timeout=25)
+            human_delay("form")
+            _submit_email_step(driver)
+            password_submitted_at = None
+            next_state = _wait_email_submit_next_state(driver, email, timeout=15)
+            if next_state == "password":
+                raise RuntimeError("邮箱进入注册密码页，拒绝执行注册流程")
+            if next_state == "otp":
+                next_state = _switch_email_verification_to_password(driver)
+            if next_state == "login_password":
+                for password_attempt in range(1, 3):
+                    password_submitted_at = time.time()
+                    _fill_login_password(driver, password)
+                    next_state = _wait_after_password_submit(driver)
+                    if next_state != "transient_error":
+                        break
+                    if password_attempt >= 2:
+                        raise RuntimeError("密码登录连续两次遇到 auth.openai.com 临时错误页")
+                    logger.info("[Token刷新] 准备从认证站点临时错误页恢复并重试密码登录")
+                    _recover_from_transient_auth_error(driver)
+            if next_state == "otp":
+                if password_submitted_at is None:
+                    raise RuntimeError("未提交密码却进入邮箱验证码分支，已停止以避免验证码优先登录")
+                _complete_email_otp(driver, email, password_submitted_at)
+            elif next_state not in {"logged_in", "login_password"}:
+                raise RuntimeError(f"邮箱提交后进入了无法识别的状态: {next_state}")
 
-    human_delay("post_auth")
-    session_info = _fetch_chatgpt_session(driver, timeout=session_timeout, auto_jump_wait=10)
-    if not str(session_info.get("accessToken") or "").strip():
-        raise RuntimeError("/api/auth/session 未返回 accessToken")
-    return session_info
+            human_delay("post_auth")
+            session_info = _fetch_chatgpt_session(driver, timeout=session_timeout, auto_jump_wait=10)
+            if not str(session_info.get("accessToken") or "").strip():
+                raise RuntimeError("/api/auth/session 未返回 accessToken")
+            return session_info
+        except Exception as exc:
+            if window_attempt >= 2 or not _is_closed_window_error(exc) or not _activate_surviving_window(driver):
+                raise
+            logger.warning("[Token刷新] 认证标签页意外关闭，准备在存活标签页重新执行密码登录")
+    raise RuntimeError("Token 更新密码登录未完成")
 
 
 def run_roxy_token_refresh(email: str, password: str, proxy: str | None = None) -> dict:
@@ -347,10 +447,7 @@ def run_roxy_token_refresh(email: str, password: str, proxy: str | None = None) 
     opened = None
     driver = None
     try:
-        opened = client.open_profile()
-        driver = _build_driver(opened)
-        _center_browser_window(driver)
-        driver.set_page_load_timeout(int(_cfg.ROXY_SELENIUM_TIMEOUT))
+        opened, driver = _open_token_refresh_browser(client)
         logger.info("[Token刷新] 开始登录：%s，profile=%s", email, opened.profile_id)
         session_info = login_roxy_driver_with_password(driver, email, password, session_timeout=100)
         access_token = str(session_info.get("accessToken") or "").strip()
@@ -370,10 +467,5 @@ def run_roxy_token_refresh(email: str, password: str, proxy: str | None = None) 
         logger.warning("[Token刷新] 失败：%s，%s: %s", email, type(exc).__name__, str(exc)[:240])
         return {"ok": False, "status": "failed", "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
     finally:
-        if driver and not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
-            try:
-                driver.quit()
-            except Exception:
-                pass
-        if opened and not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
-            client.cleanup_profile(opened)
+        if not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
+            _cleanup_token_refresh_browser(client, opened, driver)
