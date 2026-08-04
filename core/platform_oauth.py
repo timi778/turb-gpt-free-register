@@ -8,7 +8,6 @@ import json
 import logging
 import re
 import secrets
-import time
 import uuid
 from dataclasses import dataclass
 from urllib.parse import parse_qs, unquote_plus, urlencode, urlparse
@@ -260,180 +259,87 @@ def _ensure_playwright_oai_did(context, device_id: str) -> None:
 
 
 def get_platform_oauth_tokens_playwright(context, email: str) -> dict:
-    """复用 Playwright BrowserContext 的真实浏览器页面、Cookie 与出口代理。"""
-    if context is None or not hasattr(context, "new_page"):
-        raise RuntimeError("Playwright BrowserContext 不可用")
+    """使用 Playwright BrowserContext 的 Cookie-aware HTTP client 完成 OAuth。"""
+    request = getattr(context, "request", None)
+    if context is None or request is None or not hasattr(request, "get"):
+        raise RuntimeError("Playwright BrowserContext request 不可用")
     auth = build_platform_authorization(email, _playwright_device_id(context))
     _ensure_playwright_oai_did(context, auth.device_id)
     timeout_ms = max(1, int(getattr(_cfg, "CHATGPT2API_TIMEOUT", 30) or 30)) * 1000
-    page = context.new_page()
-    try:
-        page.goto(auth.url, wait_until="domcontentloaded", timeout=timeout_ms)
-        final_url = str(getattr(page, "url", "") or "")
-        body = ""
-        if "code=" not in final_url:
-            try:
-                body = str(page.content() or "")
-            except Exception:
-                body = ""
-        code = extract_authorization_code(
-            final_url, expected_state=auth.state, response_body=body
-        )
-        encoded = _token_body(code, auth.code_verifier)
-        try:
-            raw = page.evaluate(
-                """async ({url, body}) => {
-                  try {
-                    const response = await fetch(url, {
-                      method: 'POST', credentials: 'include',
-                      headers: {'accept': 'application/json', 'content-type': 'application/x-www-form-urlencoded'},
-                      body
-                    });
-                    return {status: response.status, text: await response.text()};
-                  } catch (error) {
-                    return {status: 0, error: String(error)};
-                  }
-                }""",
-                {"url": PLATFORM_TOKEN_URL, "body": encoded},
-            )
-            if not isinstance(raw, dict) or raw.get("error"):
-                raise RuntimeError(
-                    str(raw.get("error") if isinstance(raw, dict) else raw)
-                )
-            token_response = type("PlaywrightOAuthResponse", (), {
-                "status_code": int(raw.get("status") or 0),
-                "text": str(raw.get("text") or ""),
-            })()
-            return _validate_token_response(token_response)
-        except Exception as browser_exc:
-            logger.warning(
-                "[Platform OAuth] 浏览器内 token 交换失败，改用 context.request: %s",
-                str(browser_exc)[:180],
-            )
-            if getattr(context, "request", None) is None:
-                raise
-            token_response = context.request.post(
-                PLATFORM_TOKEN_URL,
-                headers=_token_headers(),
-                data=encoded,
-                timeout=timeout_ms,
-            )
-            return _validate_token_response(token_response)
-    finally:
-        try:
-            page.close()
-        except Exception as exc:
-            logger.debug("[Platform OAuth] 关闭临时 Playwright 页面失败: %s", exc)
+    authorize_response = request.get(
+        auth.url,
+        headers=_authorize_headers(),
+        timeout=timeout_ms,
+    )
+    final_url = _response_url(authorize_response)
+    body = "" if "code=" in final_url else _response_text(authorize_response)
+    code = extract_authorization_code(
+        final_url, expected_state=auth.state, response_body=body
+    )
+    token_response = request.post(
+        PLATFORM_TOKEN_URL,
+        headers=_token_headers(),
+        data=_token_body(code, auth.code_verifier),
+        timeout=timeout_ms,
+    )
+    return _validate_token_response(token_response)
 
 
 def _selenium_device_id(driver) -> str:
-    try:
-        for cookie in driver.get_cookies():
-            if cookie.get("name") == "oai-did" and cookie.get("value"):
-                return str(cookie["value"])
-    except Exception as exc:
-        logger.debug("[Platform OAuth] Selenium 读取 oai-did Cookie 失败: %s", exc)
+    for cookie in _selenium_all_cookies(driver):
+        if cookie.get("name") == "oai-did" and cookie.get("value"):
+            return str(cookie["value"])
     return str(uuid.uuid4())
 
 
-def _ensure_selenium_oai_did(driver, device_id: str) -> None:
+def _selenium_all_cookies(driver) -> list[dict]:
+    """读取整个 Chromium Cookie Jar，避免仅导出当前域名 Cookie。"""
+    for method in ("Storage.getCookies", "Network.getAllCookies"):
+        try:
+            result = driver.execute_cdp_cmd(method, {}) or {}
+            cookies = result.get("cookies") if isinstance(result, dict) else None
+            if isinstance(cookies, list) and cookies:
+                return [cookie for cookie in cookies if isinstance(cookie, dict)]
+        except Exception as exc:
+            logger.debug("[Platform OAuth] Selenium 读取 Cookie 失败 method=%s error=%s", method, exc)
     try:
-        for domain in (".auth.openai.com", ".openai.com"):
-            driver.execute_cdp_cmd("Network.setCookie", {
-                "name": "oai-did",
-                "value": device_id,
-                "domain": domain,
-                "path": "/",
-                "secure": True,
-            })
+        cookies = driver.get_cookies()
     except Exception as exc:
-        logger.debug("[Platform OAuth] Selenium 写入 oai-did Cookie 失败: %s", exc)
+        logger.debug("[Platform OAuth] Selenium 回退读取 Cookie 失败: %s", exc)
+        return []
+    return [cookie for cookie in cookies if isinstance(cookie, dict)]
 
 
-def _open_selenium_tab(driver) -> tuple[str | None, str | None]:
-    original = getattr(driver, "current_window_handle", None)
-    before = set(getattr(driver, "window_handles", []) or [])
-    try:
-        driver.switch_to.new_window("tab")
-    except Exception:
-        driver.execute_script("window.open('about:blank', '_blank')")
-        end = time.time() + 5
-        while time.time() < end:
-            handles = list(getattr(driver, "window_handles", []) or [])
-            added = [item for item in handles if item not in before]
-            if added:
-                driver.switch_to.window(added[-1])
-                break
-            time.sleep(0.1)
-    current = getattr(driver, "current_window_handle", None)
-    return original, current
-
-
-def _selenium_exchange(driver, code: str, code_verifier: str) -> dict:
-    script = r"""
-    const url = arguments[0], body = arguments[1], done = arguments[arguments.length - 1];
-    fetch(url, {
-      method: 'POST', credentials: 'include',
-      headers: {'accept': 'application/json', 'content-type': 'application/x-www-form-urlencoded'},
-      body
-    }).then(async response => done({status: response.status, text: await response.text()}))
-      .catch(error => done({status: 0, error: String(error)}));
-    """
-    raw = driver.execute_async_script(
-        script, PLATFORM_TOKEN_URL, _token_body(code, code_verifier)
-    )
-    if not isinstance(raw, dict) or raw.get("error"):
-        raise RuntimeError(f"浏览器内 token 交换失败: {(raw or {}).get('error', '无响应') if isinstance(raw, dict) else raw}")
-    response = type("SeleniumOAuthResponse", (), {
-        "status_code": int(raw.get("status") or 0),
-        "text": str(raw.get("text") or ""),
-    })()
-    return _validate_token_response(response)
+def _copy_selenium_cookies(driver, http_session) -> int:
+    jar = getattr(getattr(http_session, "session", None), "cookies", None)
+    if jar is None or not hasattr(jar, "set"):
+        raise RuntimeError("HTTP OAuth session Cookie Jar 不可用")
+    copied = 0
+    for cookie in _selenium_all_cookies(driver):
+        name = str(cookie.get("name") or "").strip()
+        value = str(cookie.get("value") or "")
+        domain = str(cookie.get("domain") or "").strip()
+        path = str(cookie.get("path") or "/")
+        if not name or not domain:
+            continue
+        try:
+            jar.set(name, value, domain=domain, path=path)
+            copied += 1
+        except Exception as exc:
+            logger.debug("[Platform OAuth] 导入 Selenium Cookie 失败 name=%s error=%s", name, exc)
+    return copied
 
 
 def get_platform_oauth_tokens_selenium(driver, email: str, proxy: str | None = None) -> dict:
-    """在 Roxy Selenium 的同一浏览器/代理中完成授权和 token 交换。"""
-    auth = build_platform_authorization(email, _selenium_device_id(driver))
-    _ensure_selenium_oai_did(driver, auth.device_id)
-    original = new_handle = None
-    try:
-        original, new_handle = _open_selenium_tab(driver)
-        driver.get(auth.url)
-        final_url = str(getattr(driver, "current_url", "") or "")
-        body = ""
-        if "code=" not in final_url:
-            body = str(getattr(driver, "page_source", "") or "")
-        code = extract_authorization_code(
-            final_url, expected_state=auth.state, response_body=body
-        )
-        try:
-            return _selenium_exchange(driver, code, auth.code_verifier)
-        except Exception as browser_exc:
-            logger.warning(
-                "[Platform OAuth] 浏览器内 token 交换失败，改用 HTTP 交换: %s",
-                str(browser_exc)[:180],
-            )
-            from core.session import BrowserSession
+    """导入 Selenium 登录态后，用一个 HTTP 会话完成 OAuth 全流程。"""
+    from core.session import BrowserSession
 
-            fallback = BrowserSession(proxy=proxy)
-            fallback.device_id = auth.device_id
-            response = fallback.post(
-                PLATFORM_TOKEN_URL,
-                headers=_token_headers(fallback),
-                data=_token_body(code, auth.code_verifier),
-            )
-            return _validate_token_response(response)
-    finally:
-        if new_handle and new_handle != original:
-            try:
-                driver.close()
-            except Exception as exc:
-                logger.debug("[Platform OAuth] 关闭临时 Selenium 标签失败: %s", exc)
-        if original:
-            try:
-                driver.switch_to.window(original)
-            except Exception as exc:
-                logger.debug("[Platform OAuth] 恢复 Selenium 原标签失败: %s", exc)
+    http_session = BrowserSession(proxy=proxy)
+    http_session.device_id = _selenium_device_id(driver)
+    copied = _copy_selenium_cookies(driver, http_session)
+    _ensure_http_oai_did(http_session, http_session.device_id)
+    logger.debug("[Platform OAuth] Selenium Cookie 已导入 HTTP 会话: count=%s", copied)
+    return get_platform_oauth_tokens(http_session, email)
 
 
 def finalize_platform_oauth(tokens: dict, email: str) -> dict:
