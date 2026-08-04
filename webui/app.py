@@ -1697,6 +1697,18 @@ def create_app(auth_code: str | None = None) -> Flask:
     def api_config_get():
         return jsonify(config_editor.get_config())
 
+    @app.post("/api/chatgpt2api/test")
+    def api_chatgpt2api_test():
+        """使用当前表单值检测 chatgpt2api 管理接口，不要求先保存配置。"""
+        data = request.get_json(silent=True) or {}
+        from core.chatgpt2api_client import test_connection
+
+        result = test_connection(
+            str(data.get("base_url") or "").strip(),
+            str(data.get("admin_key") or "").strip(),
+        )
+        return jsonify(result)
+
     @app.post("/api/cloudmail/gen-token")
     def api_cloudmail_gen_token():
         """手动生成 CloudMail Authorization Token，并把本次填写的 CloudMail 配置一并写入 .env。"""

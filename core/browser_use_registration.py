@@ -2120,6 +2120,10 @@ def run_browser_use_registration(
                 logger.warning("[BrowserUse] 当前路径暂不自动设置 2FA，已跳过")
             totp_secret = None
 
+            # Codex 阶段会先关闭注册 BrowserContext；必须在此之前复用共享 Cookie/代理。
+            from core.platform_oauth import run_platform_oauth_playwright
+            platform_oauth_result = run_platform_oauth_playwright(context, email)
+
             codex_result = {
                 "status": "skipped",
                 "ok": True,
@@ -2177,6 +2181,7 @@ def run_browser_use_registration(
                     },
                     "registration_password": openai_password,
                     "password_setup": password_setup,
+                    "platform_oauth": platform_oauth_result,
                     "codex": codex_result,
                 },
             )
@@ -2190,6 +2195,7 @@ def run_browser_use_registration(
                 "totp_secret": totp_secret,
                 "registration_password": openai_password,
                 "password_setup": password_setup,
+                "platform_oauth": platform_oauth_result,
                 "codex": codex_result,
                 "error": None if password_ok else f"账号密码未设置: {password_setup.get('message')}",
             }

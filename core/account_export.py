@@ -432,6 +432,23 @@ def save_account_data(
     )
     logger.info(f"[Save] 账号已写入 DB, id={row_id}, email={email}")
     logger.info(f"[Save] 批次归档目录: {batch_folder}")
+    # 本地保存是注册成功的主事实；远端上传紧随其后同步执行，但任何失败都不能
+    # 回滚本地账号或改变注册结果。下一个账号仍会独立再次尝试上传。
+    try:
+        from core.chatgpt2api_client import auto_upload_registered_account
+
+        auto_upload_registered_account(
+            access_token,
+            platform_oauth=extra.get("platform_oauth"),
+            email=email,
+            password=str(extra.get("registration_password") or ""),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[chatgpt2api] 自动上传异常（本地账号已保留）: email=%s error=%s",
+            email,
+            f"{type(exc).__name__}: {str(exc)[:180]}",
+        )
     # session 中的 account.planType 不能说明 Plus 试用资格。账号落库后只负责
     # 入队，由专用线程池异步查询并回写，避免占用注册工作线程。
     try:

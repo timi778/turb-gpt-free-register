@@ -122,6 +122,10 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
             logger.warning("[Cloak注册] 当前 CloakBrowser 自动化路径暂不执行 2FA 设置，已跳过")
         totp_secret = None
 
+        # Cloak Codex OAuth 会清理浏览器状态；先复用 Playwright context Cookie 获取 RT。
+        from core.platform_oauth import run_platform_oauth_playwright
+        platform_oauth_result = run_platform_oauth_playwright(driver.context, email)
+
         codex_result = {
             "status": "skipped",
             "ok": True,
@@ -160,6 +164,7 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
                 "cloakbrowser": {"profile_id": opened.profile_id, "open_result": opened.raw},
                 "registration_password": openai_password,
                 "password_setup": password_setup,
+                "platform_oauth": platform_oauth_result,
                 "codex": codex_result,
             },
         )
@@ -170,7 +175,7 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
             errors.append(f"账号密码未设置: {password_setup.get('message')}")
         if not codex_ok:
             errors.append(f"Codex 未完成: {codex_result.get('message')}")
-        return {"success": bool(codex_ok and password_ok), "email": email, "account_id": account_id, "access_token": access_token, "totp_secret": totp_secret, "registration_password": openai_password, "password_setup": password_setup, "codex": codex_result, "error": "; ".join(errors) or None}
+        return {"success": bool(codex_ok and password_ok), "email": email, "account_id": account_id, "access_token": access_token, "totp_secret": totp_secret, "registration_password": openai_password, "password_setup": password_setup, "platform_oauth": platform_oauth_result, "codex": codex_result, "error": "; ".join(errors) or None}
     except Exception as exc:
         logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Cloak注册] 失败详情", exc_info=True)

@@ -37,6 +37,7 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "CLOUDMAIL_AUTH_TOKEN": "CloudMail Authorization Token",
     "CLOUDMAIL_PASSWORD": "CloudMail 登录密码",
     "CPA_MANAGEMENT_KEY": "CPA 管理接口密钥",
+    "CHATGPT2API_ADMIN_KEY": "chatgpt2api 管理鉴权 Key",
     "EXTRACT_LINK_CDK": "提链服务 CDK",
     "SMS_API_KEY": "接码平台 API Key（如 GrizzlySMS）",
     "L_ADMIN_AUTH_CODE": "本地 L 接码服务 ADMIN_AUTH_CODE",

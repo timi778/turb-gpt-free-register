@@ -73,6 +73,13 @@ EMAIL_SOURCE = "outlook,generic_api"
 - 手机验证支持自动取号、填号、收码、提交、失败换号重试。
 - Codex 凭证落盘到 `codex_accounts/`。
 
+### Platform OAuth 与 chatgpt2api
+
+- 注册登录态建立后可复用同一 Cookie / 代理执行 OpenAI Platform OAuth PKCE，获取 `access_token`、`refresh_token` 和 `id_token`。
+- 获取到 RT 时会在 `codex_accounts/` 保存完整 Codex 凭证；获取失败不影响 ChatGPT session AT 和账号本地保存。
+- 可为 WebUI 配置 chatgpt2api 服务地址与管理鉴权 Key，并通过 `GET /api/accounts` 检测连接。
+- 每个账号本地保存后立即调用 `POST /api/accounts`：存在 RT 时上传完整 Codex 账号结构；没有 RT 时只上传 ChatGPT AT。RT 上传失败不会再降级重复上传 AT。
+
 ### WebUI
 
 - 批量启动注册任务。
@@ -122,6 +129,7 @@ cp .env.example .env
 - `QQ_IMAP_PASSWORD`
 - `CLOUDFLARE_API_KEY` / `CLOUDFLARE_CUSTOM_AUTH`（`EMAIL_SOURCE=cloudflare` 时）
 - `CPA_MANAGEMENT_KEY`
+- `CHATGPT2API_ADMIN_KEY`
 - `SMS_API_KEY`
 - `L_ADMIN_AUTH_CODE`
 - `H_ADMIN_AUTH_CODE`
@@ -417,6 +425,20 @@ CODEX_AUTH_URL_SOURCE = "cpa"
 CPA_MANAGEMENT_URL = "你的CPA管理地址"
 CPA_MANAGEMENT_KEY = "你的CPA管理密钥"
 ```
+
+### 5. 配置 Platform OAuth 与 chatgpt2api 自动上传
+
+在 WebUI「配置 → chatgpt2api」填写并保存：
+
+```dotenv
+ENABLE_PLATFORM_OAUTH=True
+CHATGPT2API_AUTO_UPLOAD=True
+CHATGPT2API_BASE_URL=https://你的-chatgpt2api-地址
+CHATGPT2API_ADMIN_KEY=你的管理鉴权-Key
+CHATGPT2API_TIMEOUT=30
+```
+
+点击「检测连接」后显示「连接正常」才表示服务地址和管理 Key 均有效。自动上传按账号同步触发，不等待整批注册完成；单次上传失败只记录日志并保留本地账号，后续账号仍会继续尝试。
 
 ---
 

@@ -474,6 +474,11 @@ def run_registration(
         else:
             logger.debug("已跳过 2FA 设置 (config.ENABLE_2FA=False)")
 
+        # ==================== 阶段 7.4: Platform OAuth AT/RT ====================
+        # 必须在旧 Codex OAuth 创建干净 session 前复用当前注册 Cookie。
+        from core.platform_oauth import run_platform_oauth_http
+        platform_oauth_result = run_platform_oauth_http(session, email)
+
         # ==================== 阶段 7.5: Codex OAuth（注册成功→拿回调/CPA凭证）====================
         # 用全新干净 session 从头登录该邮箱，走 邮箱OTP→手机短信验证(接码)→选workspace
         # →拿 code 的标准路径（不复用注册 session，避免撞 choose-an-account）。
@@ -521,6 +526,7 @@ def run_registration(
                 "browser_profile": getattr(session, "browser_profile", None),
                 "registration_password": openai_password,
                 "password_setup": password_setup,
+                "platform_oauth": platform_oauth_result,
                 "codex": codex_result,
             },
         )
@@ -570,7 +576,7 @@ def run_registration(
         return {"success": task_success, "email": email, "account_id": account_id,
                 "access_token": access_token, "totp_secret": totp_secret,
                 "registration_password": openai_password, "password_setup": password_setup,
-                "flow": flow_result, "codex": codex_result,
+                "flow": flow_result, "platform_oauth": platform_oauth_result, "codex": codex_result,
                 "error": task_error}
 
     except Exception as e:
