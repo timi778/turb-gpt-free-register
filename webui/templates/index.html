@@ -2803,6 +2803,21 @@ function renderCloudMailTokenTools() {
   `;
 }
 
+function renderChatgpt2ApiTools() {
+  if (CONFIG_ACTIVE_GROUP !== 'chatgpt2api') return '';
+  return `
+    <div class="roxy-workspace-box">
+      <div>
+        <b>连接状态</b>
+      </div>
+      <div class="action-cell">
+        <button class="btn primary" type="button" id="btnTestChatgpt2Api">检测连接</button>
+      </div>
+      <div id="chatgpt2ApiStatus" class="muted" style="font-size:12px;">未检测</div>
+    </div>
+  `;
+}
+
 function _configValue(key) {
   const el = $(`#tab-config [data-key="${CSS.escape(key)}"]`);
   if (el) return el.value;
@@ -2865,7 +2880,34 @@ async function loadCloudMailDomains() {
   }
 }
 
+async function testChatgpt2ApiConnection() {
+  const btn = $('#btnTestChatgpt2Api');
+  const status = $('#chatgpt2ApiStatus');
+  if (!btn || !status) return;
+  btn.disabled = true;
+  status.textContent = '正在检测连接...';
+  try {
+    const r = await api('/api/chatgpt2api/test', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        base_url: _configValue('CHATGPT2API_BASE_URL').trim(),
+        admin_key: _configValue('CHATGPT2API_ADMIN_KEY').trim(),
+      }),
+    });
+    if (!r.ok) throw new Error(r.error || '连接失败');
+    const count = Number.isInteger(r.account_count) ? `，账号 ${r.account_count} 个` : '';
+    status.innerHTML = `<span style="color:var(--green);">连接正常</span> · HTTP ${esc(r.http_status || 200)}${esc(count)}`;
+  } catch(e) {
+    status.innerHTML = `<span style="color:var(--red);">连接失败：${esc(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function bindRoxyWorkspaceTools() {
+  const chatgpt2ApiBtn = $('#btnTestChatgpt2Api');
+  if (chatgpt2ApiBtn) chatgpt2ApiBtn.addEventListener('click', testChatgpt2ApiConnection);
   const cloudBtn = $('#btnGenCloudMailToken');
   if (cloudBtn) cloudBtn.addEventListener('click', genCloudMailToken);
   const cloudDomainBtn = $('#btnLoadCloudMailDomains');
@@ -2891,6 +2933,7 @@ function renderConfigPanel() {
     <div class="config-panel">
       <h3>${esc(CONFIG_ACTIVE_GROUP)}</h3>
       ${renderRoxyWorkspaceTools()}
+      ${renderChatgpt2ApiTools()}
       ${renderConfigFields(fields)}
     </div>
   `;

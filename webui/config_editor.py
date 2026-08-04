@@ -50,6 +50,30 @@ EDITABLE_FIELDS = [
         "label": "注册驱动", "help": "protocol=纯协议；roxy=RoxyBrowser；cloak=CloakBrowser；browser_use=Browser Use Cloud+Playwright；skyvern=Skyvern Browser Sessions+Playwright",
     },
 
+    # ---- Platform OAuth / chatgpt2api ----
+    {
+        "key": "ENABLE_PLATFORM_OAUTH", "file": "chatgpt2api.py", "type": "bool", "group": "chatgpt2api",
+        "label": "获取 Platform OAuth RT", "help": "注册登录态建立后复用同一 Cookie 获取 Platform access token / refresh token；失败不影响 ChatGPT AT 保存",
+    },
+    {
+        "key": "CHATGPT2API_AUTO_UPLOAD", "file": "chatgpt2api.py", "type": "bool", "group": "chatgpt2api",
+        "label": "逐账号自动上传", "help": "每个账号本地保存后立即上传一次；有 RT 上传完整 Codex 结构，无 RT 上传 ChatGPT AT",
+    },
+    {
+        "key": "CHATGPT2API_BASE_URL", "file": "chatgpt2api.py", "type": "str", "group": "chatgpt2api",
+        "label": "服务地址", "help": "chatgpt2api 根地址，例如 http://127.0.0.1:5000；不要填写 /api/accounts 路径",
+        "storage": "env", "placeholder": "https://chatgpt2api.example.com",
+    },
+    {
+        "key": "CHATGPT2API_ADMIN_KEY", "file": "chatgpt2api.py", "type": "str", "group": "chatgpt2api",
+        "label": "管理鉴权 Key", "help": "作为 Authorization: Bearer <Key> 调用管理接口，仅保存到 .env",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "CHATGPT2API_TIMEOUT", "file": "chatgpt2api.py", "type": "int", "group": "chatgpt2api",
+        "label": "请求超时(秒)", "help": "连接检测、自动上传与 Platform OAuth token 交换的最长等待时间",
+    },
+
     # ---- CloakBrowser ----
     {
         "key": "CLOAK_HEADLESS", "file": "cloakbrowser.py", "type": "bool", "group": "CloakBrowser",

@@ -1881,6 +1881,12 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
             logger.warning("[Roxy注册] 当前 Roxy 自动化路径暂不执行 2FA 设置，已跳过")
         totp_secret = None
 
+        # Roxy Codex OAuth 会清理浏览器状态；Platform OAuth 必须先复用注册 Cookie。
+        from core.platform_oauth import run_platform_oauth_selenium
+        platform_oauth_result = run_platform_oauth_selenium(
+            driver, email, proxy=proxy
+        )
+
         codex_result = {
             "status": "skipped",
             "ok": True,
@@ -1921,6 +1927,7 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
                 "roxybrowser": {"profile_id": opened.profile_id, "open_result": opened.raw},
                 "registration_password": openai_password,
                 "password_setup": password_setup,
+                "platform_oauth": platform_oauth_result,
                 "codex": codex_result,
             },
         )
@@ -1939,6 +1946,7 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
             "totp_secret": totp_secret,
             "registration_password": openai_password,
             "password_setup": password_setup,
+            "platform_oauth": platform_oauth_result,
             "codex": codex_result,
             "error": "; ".join(errors) or None,
         }
