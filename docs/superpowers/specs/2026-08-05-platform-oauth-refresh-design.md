@@ -48,7 +48,7 @@ These fields are written when the registration task finishes and are not modifie
 
 Refresh metadata is stored alongside the credentials:
 
-- `refresh_status`: `success`, `failed`, or `never`.
+- `refresh_status`: `queued`, `running`, `success`, `failed`, or `never`.
 - `refresh_message`: a safe summary with no token content.
 - `refreshed_at`: the most recent refresh completion time.
 - `upload_status`: `success`, `failed`, or `skipped` for the most recent chatgpt2api synchronization.
