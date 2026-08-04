@@ -1,6 +1,5 @@
 import base64
 import hashlib
-import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -45,32 +44,30 @@ class _Session:
         })
 
 
-class _PlaywrightPage:
+class _PlaywrightRequest:
     def __init__(self):
-        self.url = "about:blank"
-        self.closed = False
+        self.get_calls = []
+        self.post_calls = []
 
-    def goto(self, url, **_kwargs):
+    def get(self, url, **kwargs):
+        self.get_calls.append((url, kwargs))
         state = parse_qs(urlparse(url).query)["state"][0]
-        self.url = f"https://platform.openai.com/auth/callback?code=pw-code&state={state}"
+        return _Response(
+            url=f"https://platform.openai.com/auth/callback?code=pw-http-code&state={state}"
+        )
 
-    def evaluate(self, _script, _args):
-        return {
-            "status": 200,
-            "text": json.dumps({
-                "access_token": "playwright-at",
-                "refresh_token": "playwright-rt",
-            }),
-        }
-
-    def close(self):
-        self.closed = True
+    def post(self, url, **kwargs):
+        self.post_calls.append((url, kwargs))
+        return _Response(payload={
+            "access_token": "playwright-http-at",
+            "refresh_token": "playwright-http-rt",
+        })
 
 
 class _PlaywrightContext:
     def __init__(self):
-        self.page = _PlaywrightPage()
         self.added_cookies = []
+        self.request = _PlaywrightRequest()
 
     def cookies(self):
         return [{"name": "oai-did", "value": "playwright-device"}]
@@ -79,27 +76,30 @@ class _PlaywrightContext:
         self.added_cookies.extend(cookies)
 
     def new_page(self):
-        return self.page
+        raise AssertionError("OAuth must not load the callback page")
 
 
-class _SwitchTo:
-    def __init__(self, driver):
-        self.driver = driver
+class _CookieJar:
+    def __init__(self):
+        self.values = []
 
-    def new_window(self, _kind):
-        self.driver.window_handles.append("oauth")
-        self.driver.current_window_handle = "oauth"
+    def set(self, name, value, **kwargs):
+        self.values.append((name, value, kwargs))
 
-    def window(self, handle):
-        self.driver.current_window_handle = handle
+
+class _SeleniumHttpSession(_Session):
+    instances = []
+
+    def __init__(self, proxy=None):
+        super().__init__()
+        self.proxy = proxy
+        self.session = type("CookieSession", (), {"cookies": _CookieJar()})()
+        self.device_id = "http-device"
+        self.__class__.instances.append(self)
 
 
 class _SeleniumDriver:
     def __init__(self):
-        self.current_window_handle = "main"
-        self.window_handles = ["main"]
-        self.switch_to = _SwitchTo(self)
-        self.current_url = "https://chatgpt.com/"
         self.cdp_calls = []
 
     def get_cookies(self):
@@ -107,23 +107,22 @@ class _SeleniumDriver:
 
     def execute_cdp_cmd(self, method, params):
         self.cdp_calls.append((method, params))
-
-    def get(self, url):
-        state = parse_qs(urlparse(url).query)["state"][0]
-        self.current_url = f"https://platform.openai.com/auth/callback?code=se-code&state={state}"
-
-    def execute_async_script(self, _script, *_args):
-        return {
-            "status": 200,
-            "text": json.dumps({
-                "access_token": "selenium-at",
-                "refresh_token": "selenium-rt",
-            }),
-        }
-
-    def close(self):
-        if self.current_window_handle in self.window_handles:
-            self.window_handles.remove(self.current_window_handle)
+        if method == "Storage.getCookies":
+            return {"cookies": [
+                {
+                    "name": "oai-did",
+                    "value": "selenium-device",
+                    "domain": ".auth.openai.com",
+                    "path": "/",
+                },
+                {
+                    "name": "session-token",
+                    "value": "session-value",
+                    "domain": ".auth.openai.com",
+                    "path": "/",
+                },
+            ]}
+        raise RuntimeError(f"unexpected CDP command: {method}")
 
 
 class PlatformOAuthTests(unittest.TestCase):
@@ -169,26 +168,37 @@ class PlatformOAuthTests(unittest.TestCase):
                 expected_state="expected",
             )
 
-    def test_playwright_path_uses_browser_page_and_restores_context(self):
+    def test_playwright_path_uses_context_request_without_loading_callback_page(self):
         from core.platform_oauth import get_platform_oauth_tokens_playwright
 
         context = _PlaywrightContext()
         tokens = get_platform_oauth_tokens_playwright(context, "user@example.com")
 
-        self.assertEqual(tokens["refresh_token"], "playwright-rt")
-        self.assertTrue(context.page.closed)
+        self.assertEqual(tokens["refresh_token"], "playwright-http-rt")
+        self.assertEqual(len(context.request.get_calls), 1)
+        self.assertEqual(len(context.request.post_calls), 1)
         self.assertTrue(any(cookie["name"] == "oai-did" for cookie in context.added_cookies))
 
-    def test_selenium_path_uses_temporary_tab_and_restores_original(self):
+    @patch("core.session.BrowserSession", _SeleniumHttpSession)
+    def test_selenium_path_copies_cookies_and_uses_one_http_session(self):
         from core.platform_oauth import get_platform_oauth_tokens_selenium
 
+        _SeleniumHttpSession.instances.clear()
         driver = _SeleniumDriver()
-        tokens = get_platform_oauth_tokens_selenium(driver, "user@example.com")
+        tokens = get_platform_oauth_tokens_selenium(
+            driver, "user@example.com", proxy="http://proxy.example:8080"
+        )
 
-        self.assertEqual(tokens["refresh_token"], "selenium-rt")
-        self.assertEqual(driver.current_window_handle, "main")
-        self.assertEqual(driver.window_handles, ["main"])
-        self.assertEqual(len(driver.cdp_calls), 2)
+        self.assertEqual(tokens["refresh_token"], "platform-rt")
+        self.assertEqual(len(_SeleniumHttpSession.instances), 1)
+        http = _SeleniumHttpSession.instances[0]
+        self.assertEqual(http.proxy, "http://proxy.example:8080")
+        self.assertEqual(len(http.get_calls), 1)
+        self.assertEqual(len(http.post_calls), 1)
+        cookie_names = [item[0] for item in http.session.cookies.values]
+        self.assertIn("session-token", cookie_names)
+        self.assertIn("oai-did", cookie_names)
+        self.assertEqual(driver.cdp_calls[0][0], "Storage.getCookies")
 
     @patch("core.codex_oauth.save_codex_credential")
     @patch("core.codex_oauth.build_codex_storage")
