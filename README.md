@@ -537,17 +537,18 @@ OTP-only 注册拿到 accessToken
   → 在 /reset-password/new-password 填写并确认密码
 ```
 
-默认由 `SET_PASSWORD_AFTER_REGISTRATION=True` 开启。纯 `protocol` 驱动不具备页面交互能力；开启该选项时仍会保存已创建账号和 Token，但任务会明确标记密码阶段未完成。
+在 WebUI「配置 → 账号密码」中勾选“自动添加注册密码”后启用。关闭时，OTP 注册获取到 `accessToken` 后会跳过安全设置补密码流程并关闭注册浏览器。纯 `protocol` 驱动不具备页面交互能力；开启该选项时仍会保存已创建账号和 Token，但任务会明确标记密码阶段未完成。
 
 密码来源：
 
-1. 优先使用 `config/register.py`：
+1. `REGISTER_PASSWORD_MODE="random"`：为每个账号自动生成独立的 14 位强密码，包含大写、小写、数字、符号。
+
+2. `REGISTER_PASSWORD_MODE="fixed"`：使用 `config/register.py` 或 WebUI 中填写的固定密码：
 
 ```python
+REGISTER_PASSWORD_MODE = "fixed"
 REGISTER_PASSWORD = "你的固定密码"
 ```
-
-2. 如果为空，自动生成 14 位强密码，包含大写、小写、数字、符号。
 
 保存位置：
 
@@ -629,7 +630,7 @@ accounts/20260709-10个-3线程/
   ↓
 进入 ChatGPT，读取 /api/auth/session accessToken
   ↓
-如注册阶段尚未设置密码：打开安全设置补设密码（可能再次验证邮箱 OTP）
+如已开启自动添加注册密码且注册阶段尚未设置：打开安全设置补设密码（可能再次验证邮箱 OTP）
   ↓
 可选 2FA
   ↓

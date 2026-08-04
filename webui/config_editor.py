@@ -259,8 +259,25 @@ EDITABLE_FIELDS = [
         "label": "启用 2FA(TOTP)", "help": "注册完成后自动设置动态口令（会多收一封 OTP 邮件）",
     },
     {
-        "key": "SET_PASSWORD_AFTER_REGISTRATION", "file": "register.py", "type": "bool", "group": "功能开关",
-        "label": "注册后设置密码", "help": "OTP 注册拿到登录态后进入安全设置补设密码；如触发邮箱验证会自动再次收码",
+        "key": "SET_PASSWORD_AFTER_REGISTRATION", "file": "register.py", "type": "bool", "group": "账号密码",
+        "label": "自动添加注册密码", "help": "勾选后，OTP 注册拿到 accessToken 后继续进入安全设置配置账号密码；关闭后直接结束注册浏览器流程",
+        "control": "checkbox",
+    },
+    {
+        "key": "REGISTER_PASSWORD_MODE", "file": "register.py", "type": "str", "group": "账号密码",
+        "label": "密码生成方式", "help": "随机密码会为每个账号生成不同的强密码；固定密码会让以后注册的账号使用同一个自定义密码",
+        "options": [
+            {"value": "random", "label": "随机密码"},
+            {"value": "fixed", "label": "固定密码"},
+        ],
+        "depends_on": "SET_PASSWORD_AFTER_REGISTRATION",
+    },
+    {
+        "key": "REGISTER_PASSWORD", "file": "register.py", "type": "str", "group": "账号密码",
+        "label": "自定义固定密码", "help": "选择固定密码时必填；以后自动配置的 ChatGPT 账号都使用这个密码",
+        "storage": "env", "secret": True,
+        "placeholder": "固定模式必填",
+        "depends_on": "REGISTER_PASSWORD_MODE", "depends_value": "fixed",
     },
     {
         "key": "ENABLE_FLOW_TRIGGER", "file": "flow_trigger.py", "type": "bool", "group": "功能开关",
@@ -286,11 +303,6 @@ EDITABLE_FIELDS = [
     {
         "key": "REGISTER_NAME", "file": "register.py", "type": "str", "group": "邮箱 / OTP",
         "label": "显示名称", "help": "留空则自动生成英文名",
-    },
-    {
-        "key": "REGISTER_PASSWORD", "file": "register.py", "type": "str", "group": "邮箱 / OTP",
-        "label": "ChatGPT 固定密码", "help": "可留空；留空时为每个账号生成独立强密码",
-        "storage": "env", "secret": True,
     },
     {
         "key": "OTP_MAX_WAIT", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
@@ -749,6 +761,12 @@ def get_config() -> list[dict]:
         item["storage"] = "env"
         item["value"] = value
         out.append(item)
+
+    # 兼容升级前仅配置 REGISTER_PASSWORD 的用户：首次打开 WebUI 时自动显示为固定密码模式。
+    values = {item["key"]: item.get("value") for item in out}
+    mode_item = next((item for item in out if item["key"] == "REGISTER_PASSWORD_MODE"), None)
+    if mode_item is not None and mode_item.get("value") not in {"random", "fixed"}:
+        mode_item["value"] = "fixed" if str(values.get("REGISTER_PASSWORD") or "").strip() else "random"
     return out
 
 
@@ -883,6 +901,31 @@ def _format_env_value(value, vtype: str) -> str:
 def update_config(updates: dict) -> dict:
     """批量更新配置。所有 WebUI 可编辑项只写项目根 `.env`。"""
     from config.env_loader import write_env_values, load_env
+
+    password_keys = {
+        "SET_PASSWORD_AFTER_REGISTRATION", "REGISTER_PASSWORD_MODE", "REGISTER_PASSWORD",
+    }
+    if password_keys.intersection(updates):
+        from config import register as register_config
+
+        enabled = updates.get(
+            "SET_PASSWORD_AFTER_REGISTRATION",
+            getattr(register_config, "SET_PASSWORD_AFTER_REGISTRATION", True),
+        )
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() in ("true", "1", "yes", "on", "y")
+        mode = str(updates.get(
+            "REGISTER_PASSWORD_MODE",
+            getattr(register_config, "REGISTER_PASSWORD_MODE", "random"),
+        ) or "").strip().lower()
+        password = str(updates.get(
+            "REGISTER_PASSWORD",
+            getattr(register_config, "REGISTER_PASSWORD", ""),
+        ) or "").strip()
+        if mode not in {"random", "fixed"}:
+            raise ValueError("密码生成方式只能选择 random 或 fixed")
+        if enabled and mode == "fixed" and not password:
+            raise ValueError("选择固定密码时，请填写自定义固定密码")
 
     updated, ignored = [], []
     env_updates: dict[str, str] = {}

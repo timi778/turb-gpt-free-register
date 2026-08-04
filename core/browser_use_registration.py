@@ -136,12 +136,19 @@ def _generate_password(length: int = 14) -> str:
 def _registration_password() -> str:
     try:
         from config import register as _register_cfg
+        mode = str(getattr(_register_cfg, "REGISTER_PASSWORD_MODE", "") or "").strip().lower()
         configured = str(getattr(_register_cfg, "REGISTER_PASSWORD", "") or "").strip()
-        if configured:
+        if not mode:
+            mode = "fixed" if configured else "random"
+        if mode == "fixed":
+            if not configured:
+                raise RuntimeError("固定密码模式未配置 REGISTER_PASSWORD")
             return configured
-    except Exception:
-        pass
-    return _generate_password()
+        if mode == "random":
+            return _generate_password()
+        raise RuntimeError(f"不支持的 REGISTER_PASSWORD_MODE={mode!r}")
+    except ImportError:
+        return _generate_password()
 
 
 def _timeout_ms(seconds: int | None = None) -> int:

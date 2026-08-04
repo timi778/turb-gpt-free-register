@@ -293,6 +293,18 @@
     .config-panel label.fld .hint .mono {
       white-space: normal; overflow-wrap: anywhere; word-break: break-all;
     }
+    .config-panel label.fld.config-check {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 6px; cursor: pointer;
+    }
+    .config-panel .config-checkline {
+      display: flex; align-items: center; gap: 8px; min-height: 22px;
+      font-weight: 800;
+    }
+    .config-panel .config-checkline input[type="checkbox"] {
+      width: 18px; height: 18px; min-width: 18px; margin: 1px 0 0;
+      accent-color: var(--blue); cursor: pointer;
+    }
+    .config-panel label.fld.config-check .hint { margin-top: 0; }
     .config-count { opacity: .72; font-weight: 700; margin-left: 4px; }
     .roxy-workspace-box {
       grid-column: 1 / -1; border: 1px solid #c3d4fb; background: #eef4ff;
@@ -2591,22 +2603,33 @@ function configGroups() {
   return groups;
 }
 
-function renderConfigField(f) {
-  let html = `<label class="fld">${esc(f.label)}<span class="hint">${esc(f.help)} · <span class="mono">${esc(f.key)}</span></span>`;
-  if (f.type === 'bool') {
-    html += `<select data-key="${attrEsc(f.key)}"><option value="true"${f.value?' selected':''}>开启 (True)</option><option value="false"${!f.value?' selected':''}>关闭 (False)</option></select>`;
+function renderConfigField(f, options = {}) {
+  const classes = ['fld', options.className || ''].filter(Boolean).join(' ');
+  const disabled = options.disabled ? ' disabled' : '';
+  if (f.control === 'checkbox') {
+    return `<label class="${classes} config-check"><span class="config-checkline"><input type="checkbox" data-key="${attrEsc(f.key)}"${f.value ? ' checked' : ''}${disabled}><span>${esc(f.label)}</span></span><span class="hint">${esc(f.help)} · <span class="mono">${esc(f.key)}</span></span></label>`;
+  }
+  let html = `<label class="${classes}">${esc(f.label)}<span class="hint">${esc(f.help)} · <span class="mono">${esc(f.key)}</span></span>`;
+  if (f.options) {
+    html += `<select data-key="${attrEsc(f.key)}"${disabled}>${f.options.map(option => {
+      const value = typeof option === 'string' ? option : option.value;
+      const label = typeof option === 'string' ? option : option.label;
+      return `<option value="${attrEsc(value)}"${String(f.value || '') === String(value) ? ' selected' : ''}>${esc(label)}</option>`;
+    }).join('')}</select>`;
+  } else if (f.type === 'bool') {
+    html += `<select data-key="${attrEsc(f.key)}"${disabled}><option value="true"${f.value?' selected':''}>开启 (True)</option><option value="false"${!f.value?' selected':''}>关闭 (False)</option></select>`;
   } else if (f.type === 'int') {
-    html += `<input type="number" data-key="${attrEsc(f.key)}" value="${attrEsc(f.value == null ? '' : f.value)}">`;
+    html += `<input type="number" data-key="${attrEsc(f.key)}" value="${attrEsc(f.value == null ? '' : f.value)}"${disabled}>`;
   } else if (f.type === 'float') {
-    html += `<input type="number" step="0.1" data-key="${attrEsc(f.key)}" value="${attrEsc(f.value == null ? '' : f.value)}">`;
+    html += `<input type="number" step="0.1" data-key="${attrEsc(f.key)}" value="${attrEsc(f.value == null ? '' : f.value)}"${disabled}>`;
   } else if (f.type === 'list_str_multiline') {
-    html += `<textarea data-key="${attrEsc(f.key)}" placeholder="每行一条，可留空">${attrEsc((f.value||[]).join('\n'))}</textarea>`;
+    html += `<textarea data-key="${attrEsc(f.key)}" placeholder="每行一条，可留空"${disabled}>${attrEsc((f.value||[]).join('\n'))}</textarea>`;
   } else {
     // 空字符串/占位符 '-' 都显示为空输入框，避免误保存成真实值
     const shown = isPlaceholderEmpty(f.value) ? '' : f.value;
     const inputType = f.secret ? 'password' : 'text';
-    const ph = f.secret ? '保存在 .env，可留空' : '可留空';
-    html += `<input type="${inputType}" data-key="${attrEsc(f.key)}" value="${attrEsc(shown)}" placeholder="${ph}" autocomplete="off" spellcheck="false">`;
+    const ph = f.placeholder || (f.secret ? '保存在 .env，可留空' : '可留空');
+    html += `<input type="${inputType}" data-key="${attrEsc(f.key)}" value="${attrEsc(shown)}" placeholder="${ph}" autocomplete="off" spellcheck="false"${disabled}>`;
   }
   return html + `</label>`;
 }
@@ -2616,7 +2639,7 @@ function configSubhead(title, help = '') {
 }
 
 function emailConfigSectionForKey(key) {
-  if (['USE_EMAIL_SERVICE','REGISTER_EMAIL','REGISTER_NAME','REGISTER_PASSWORD','OTP_MAX_WAIT','OTP_POLL_INTERVAL','EMAIL_SOURCE'].includes(key)) {
+  if (['USE_EMAIL_SERVICE','REGISTER_EMAIL','REGISTER_NAME','OTP_MAX_WAIT','OTP_POLL_INTERVAL','EMAIL_SOURCE'].includes(key)) {
     return ['通用邮箱 / OTP', '邮箱来源选择、OTP 等待参数、手动邮箱等通用设置'];
   }
   if (key.startsWith('GPTMAIL_')) return ['GPTMail', 'GPTMail 临时邮箱 API 配置'];
@@ -2670,6 +2693,22 @@ function renderSectionedConfigFields(fields, activeSectionName, setActiveSection
 }
 
 function renderConfigFields(fields) {
+  if (CONFIG_ACTIVE_GROUP === '账号密码') {
+    const enabled = !!(CONFIG.find(f => f.key === 'SET_PASSWORD_AFTER_REGISTRATION') || {}).value;
+    const mode = String((CONFIG.find(f => f.key === 'REGISTER_PASSWORD_MODE') || {}).value || 'random');
+    return fields.map(f => {
+      if (f.key === 'SET_PASSWORD_AFTER_REGISTRATION') return renderConfigField(f);
+      if (f.key === 'REGISTER_PASSWORD_MODE') return renderConfigField(f, {
+        className: 'password-mode-field' + (enabled ? '' : ' hidden'),
+        disabled: !enabled,
+      });
+      if (f.key === 'REGISTER_PASSWORD') return renderConfigField(f, {
+        className: 'password-fixed-field' + (enabled && mode === 'fixed' ? '' : ' hidden'),
+        disabled: !(enabled && mode === 'fixed'),
+      });
+      return renderConfigField(f);
+    }).join('');
+  }
   if (CONFIG_ACTIVE_GROUP === '邮箱 / OTP') {
     return renderSectionedConfigFields(
       fields,
@@ -2691,6 +2730,21 @@ function renderConfigFields(fields) {
     );
   }
   return fields.map(renderConfigField).join('');
+}
+
+function syncAccountPasswordControls() {
+  const enabledEl = $('#tab-config [data-key="SET_PASSWORD_AFTER_REGISTRATION"]');
+  const modeEl = $('#tab-config [data-key="REGISTER_PASSWORD_MODE"]');
+  const fixedEl = $('#tab-config [data-key="REGISTER_PASSWORD"]');
+  if (!enabledEl || !modeEl || !fixedEl) return;
+  const enabled = !!enabledEl.checked;
+  const fixed = enabled && modeEl.value === 'fixed';
+  const modeField = modeEl.closest('.password-mode-field');
+  const fixedField = fixedEl.closest('.password-fixed-field');
+  if (modeField) modeField.classList.toggle('hidden', !enabled);
+  if (fixedField) fixedField.classList.toggle('hidden', !fixed);
+  modeEl.disabled = !enabled;
+  fixedEl.disabled = !fixed;
 }
 
 function renderConfigTabs() {
@@ -2841,6 +2895,7 @@ function renderConfigPanel() {
     </div>
   `;
   bindRoxyWorkspaceTools();
+  syncAccountPasswordControls();
 }
 
 async function loadConfig() {
@@ -2874,6 +2929,12 @@ $('#configForm').addEventListener('click', (e) => {
     CONFIG_SMS_ACTIVE_SECTION = smsBtn.dataset.smsConfigSection;
     renderConfigPanel();
     return;
+  }
+});
+
+$('#configForm').addEventListener('change', (e) => {
+  if (e.target.matches('[data-key="SET_PASSWORD_AFTER_REGISTRATION"],[data-key="REGISTER_PASSWORD_MODE"]')) {
+    syncAccountPasswordControls();
   }
 });
 
@@ -2940,6 +3001,7 @@ $('#btnSaveConfig').addEventListener('click', async () => {
     const f = CONFIG.find(x => x.key === el.dataset.key);
     if (!f) return;
     if (f.type === 'list_str_multiline') updates[f.key] = el.value.split('\n').map(s=>s.trim()).filter(Boolean);
+    else if (f.control === 'checkbox') updates[f.key] = el.checked;
     else if (f.type === 'bool') updates[f.key] = el.value === 'true';
     else if (f.type === 'int') updates[f.key] = parseInt(el.value || '0', 10);
     else if (f.type === 'float') updates[f.key] = parseFloat(el.value || '0');

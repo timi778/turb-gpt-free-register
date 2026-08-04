@@ -7,16 +7,23 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from config import register as register_config
 from config.env_loader import SECRET_ENV_KEYS
 from core import db
 from core import roxy_registration
-from core.browser_use_registration import _generate_password, _has_new_password_form as browser_has_password_form
+from core.browser_use_registration import (
+    _generate_password,
+    _has_new_password_form as browser_has_password_form,
+    _registration_password as browser_registration_password,
+)
 from core.roxy_registration import (
     _generate_roxy_password,
     _has_new_password_form as roxy_has_password_form,
     _is_login_password_url,
+    _registration_password as roxy_registration_password,
     _setup_account_password,
 )
+from webui import config_editor
 from webui.config_editor import EDITABLE_FIELDS
 
 
@@ -259,6 +266,28 @@ class AccountPasswordTests(unittest.TestCase):
             self.assertTrue(any(ch in string.digits for ch in password))
             self.assertTrue(any(not ch.isalnum() for ch in password))
 
+    def test_random_password_mode_ignores_saved_fixed_password(self):
+        with patch.object(register_config, "REGISTER_PASSWORD_MODE", "random"), \
+             patch.object(register_config, "REGISTER_PASSWORD", "Saved-Fixed-123!"):
+            generated = (roxy_registration_password(), browser_registration_password())
+
+        self.assertTrue(all(password != "Saved-Fixed-123!" for password in generated))
+        self.assertNotEqual(generated[0], generated[1])
+
+    def test_fixed_password_mode_uses_custom_password(self):
+        with patch.object(register_config, "REGISTER_PASSWORD_MODE", "fixed"), \
+             patch.object(register_config, "REGISTER_PASSWORD", "Saved-Fixed-123!"):
+            self.assertEqual(roxy_registration_password(), "Saved-Fixed-123!")
+            self.assertEqual(browser_registration_password(), "Saved-Fixed-123!")
+
+    def test_fixed_password_mode_requires_custom_password(self):
+        with patch.object(register_config, "REGISTER_PASSWORD_MODE", "fixed"), \
+             patch.object(register_config, "REGISTER_PASSWORD", ""):
+            with self.assertRaisesRegex(RuntimeError, "固定密码模式"):
+                roxy_registration_password()
+            with self.assertRaisesRegex(RuntimeError, "固定密码模式"):
+                browser_registration_password()
+
     def test_legacy_extra_json_password_is_exposed_to_console(self):
         row = {
             "id": 1,
@@ -304,9 +333,23 @@ class AccountPasswordTests(unittest.TestCase):
     def test_password_config_is_exposed_as_secret(self):
         field = next(item for item in EDITABLE_FIELDS if item["key"] == "REGISTER_PASSWORD")
         self.assertTrue(field["secret"])
+        self.assertEqual(field["group"], "账号密码")
         self.assertEqual(SECRET_ENV_KEYS["REGISTER_PASSWORD"], "ChatGPT 注册固定密码")
         switch = next(item for item in EDITABLE_FIELDS if item["key"] == "SET_PASSWORD_AFTER_REGISTRATION")
         self.assertEqual(switch["type"], "bool")
+        self.assertEqual(switch["group"], "账号密码")
+        self.assertEqual(switch["control"], "checkbox")
+        mode = next(item for item in EDITABLE_FIELDS if item["key"] == "REGISTER_PASSWORD_MODE")
+        self.assertEqual(mode["group"], "账号密码")
+        self.assertEqual([option["value"] for option in mode["options"]], ["random", "fixed"])
+
+    def test_webui_rejects_empty_fixed_password(self):
+        with self.assertRaisesRegex(ValueError, "请填写自定义固定密码"):
+            config_editor.update_config({
+                "SET_PASSWORD_AFTER_REGISTRATION": True,
+                "REGISTER_PASSWORD_MODE": "fixed",
+                "REGISTER_PASSWORD": "",
+            })
 
 
 if __name__ == "__main__":

@@ -10,8 +10,12 @@ from config.env_loader import apply_env_overrides
 # 注册邮箱（留空 + USE_EMAIL_SERVICE=True 时从 Outlook 池领取）
 REGISTER_EMAIL = ""
 
-# 注册密码。留空时每个账号自动生成独立强密码。
+# 固定注册密码，仅在 REGISTER_PASSWORD_MODE=fixed 时使用。
 REGISTER_PASSWORD = ""
+
+# 注册密码生成方式：random=每个账号随机生成；fixed=使用 REGISTER_PASSWORD。
+# 空值仅用于兼容旧配置：已有 REGISTER_PASSWORD 时按 fixed，否则按 random。
+REGISTER_PASSWORD_MODE = ""
 
 # OTP-only 注册拿到登录态后，主动进入安全设置补设账号密码。
 SET_PASSWORD_AFTER_REGISTRATION = True
@@ -24,6 +28,11 @@ REGISTER_NAME = ""
 apply_env_overrides(globals(), {
     'REGISTER_EMAIL': 'str',
     'REGISTER_PASSWORD': 'str',
+    'REGISTER_PASSWORD_MODE': 'str',
     'SET_PASSWORD_AFTER_REGISTRATION': 'bool',
     'REGISTER_NAME': 'str',
 })
+
+REGISTER_PASSWORD_MODE = str(REGISTER_PASSWORD_MODE or "").strip().lower()
+if not REGISTER_PASSWORD_MODE:
+    REGISTER_PASSWORD_MODE = "fixed" if str(REGISTER_PASSWORD or "").strip() else "random"
