@@ -341,6 +341,6 @@ git add README.md docs/superpowers/specs/2026-08-05-platform-oauth-refresh-desig
 git commit -m "docs: explain platform OAuth refresh controls"
 ```
 
-- [ ] **Step 6: Push and create or update the PR**
+- [x] **Step 6: Push and create or update the PR**
 
 Push `codex/platform-oauth-http-exchange` to the configured fork remote. If PR #2 is still open, update it; otherwise create a new PR targeting `timi778/turb-gpt-free-register` with the verified behavior and commands in the body.
