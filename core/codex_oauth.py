@@ -23,9 +23,11 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import random
 import secrets
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qs, quote
@@ -995,10 +997,16 @@ def save_codex_credential(storage: dict, email: str, plan_type: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     fname = _credential_file_name(email, plan_type)
     path = out_dir / fname
-    path.write_text(
-        json.dumps(storage, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    tmp = out_dir / f".{fname}.{uuid.uuid4().hex}.tmp"
+    try:
+        tmp.write_text(
+            json.dumps(storage, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
     return path
 
 

@@ -79,6 +79,10 @@ EMAIL_SOURCE = "outlook,generic_api"
 - 获取到 RT 时会在 `codex_accounts/` 保存完整 Codex 凭证；获取失败不影响 ChatGPT session AT 和账号本地保存。
 - 可为 WebUI 配置 chatgpt2api 服务地址与管理鉴权 Key，并通过 `GET /api/accounts` 检测连接。
 - 每个账号本地保存后立即调用 `POST /api/accounts`：存在 RT 时上传完整 Codex 账号结构；没有 RT 时只上传 ChatGPT AT。RT 上传失败不会再降级重复上传 AT。
+- 注册任务列表的「首次 RT」保存该次注册当时的结果，后续刷新账号 OAuth 不会改写历史；功能升级前的旧任务显示「未知」。
+- 账号页的「当前 RT」显示账号目前是否保存 Platform RT，以及最近一次刷新和 chatgpt2api 同步结果。
+- 勾选账号后可点击「刷新 OAuth」执行 refresh-token grant。服务端返回新 RT 时替换旧值，未返回新 RT 时保留旧值；成功后更新本地 Codex 凭证并立即同步 chatgpt2api。
+- `invalid_grant`、超时或网络错误只标记刷新失败并保留本地原值，不会自动打开浏览器或触发邮箱 OTP。
 
 ### WebUI
 
@@ -474,8 +478,8 @@ WebUI 页面说明：
 
 | 页面 | 功能 |
 |---|---|
-| 注册 | 设置注册数量、分组和线程数，启动批量注册，查看任务和日志 |
-| 账号 | 按分组查看账号、复制 token、管理分组、补跑 Codex、批量删除账号 |
+| 注册 | 设置注册数量、分组和线程数，启动批量注册，查看任务、首次 RT 结果和日志 |
+| 账号 | 按分组查看账号和当前 RT，批量刷新 OAuth、复制 token、管理分组、补跑 Codex、批量删除账号 |
 | Codex 授权 | 查看/下载/删除 `codex_accounts/` 凭证 |
 | 邮箱池 | 导入邮箱、筛选来源、标记可用/失败、删除邮箱 |
 | 配置 | 修改运行配置并热加载，含 Roxy、Codex、邮箱、代理、人工节奏等 |

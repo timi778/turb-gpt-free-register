@@ -27,6 +27,8 @@ _PLAN_CHECK_STALE_SECONDS = 120
 _PLAN_CHECK_QUEUE_STALE_SECONDS = 1800
 _TOKEN_REFRESH_STALE_SECONDS = 15 * 60
 _TOKEN_REFRESH_QUEUE_STALE_SECONDS = 30 * 60
+_PLATFORM_OAUTH_REFRESH_STALE_SECONDS = 5 * 60
+_PLATFORM_OAUTH_REFRESH_QUEUE_STALE_SECONDS = 30 * 60
 _ACCESS_TOKEN_LIFETIME_DAYS = 10
 
 _OUTLOOK_JSON = _PROJECT_ROOT / "用于注册的邮箱.json"
@@ -534,8 +536,61 @@ def _find_by_email(rows: list[dict], email: str) -> dict | None:
     return next((r for r in rows if (r.get("email") or "").lower() == target), None)
 
 
+def _account_platform_oauth(row: dict) -> tuple[dict, dict]:
+    """读取账号 extra_json，并返回可安全修改的 (extra, platform_oauth)。"""
+    raw_extra = row.get("extra_json")
+    if isinstance(raw_extra, dict):
+        extra = dict(raw_extra)
+    else:
+        try:
+            parsed = json.loads(raw_extra) if raw_extra else {}
+            extra = dict(parsed) if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            extra = {}
+    raw_oauth = extra.get("platform_oauth")
+    oauth = dict(raw_oauth) if isinstance(raw_oauth, dict) else {}
+    return extra, oauth
+
+
+def _store_account_platform_oauth(row: dict, extra: dict, oauth: dict) -> None:
+    updated_extra = dict(extra)
+    updated_extra["platform_oauth"] = dict(oauth)
+    row["extra_json"] = json.dumps(updated_extra, ensure_ascii=False)
+
+
 def _decorate_account(row: dict, group_by_id: dict[int, str] | None = None) -> dict:
     out = dict(row)
+    _extra, platform_oauth = _account_platform_oauth(row)
+    out["platform_oauth_has_refresh_token"] = bool(
+        str(platform_oauth.get("refresh_token") or "").strip()
+    )
+    out["platform_oauth_refresh_status"] = str(
+        platform_oauth.get("refresh_status") or "never"
+    )
+    out["platform_oauth_refresh_message"] = str(
+        platform_oauth.get("refresh_message") or ""
+    )
+    out["platform_oauth_refresh_queued_at"] = str(
+        platform_oauth.get("refresh_queued_at") or ""
+    )
+    out["platform_oauth_refresh_started_at"] = str(
+        platform_oauth.get("refresh_started_at") or ""
+    )
+    out["platform_oauth_refreshed_at"] = str(
+        platform_oauth.get("refreshed_at") or ""
+    )
+    out["platform_oauth_upload_status"] = str(
+        platform_oauth.get("upload_status") or ""
+    )
+    out["platform_oauth_upload_message"] = str(
+        platform_oauth.get("upload_message") or ""
+    )
+    out["platform_oauth_credential_status"] = str(
+        platform_oauth.get("credential_status") or ""
+    )
+    out["platform_oauth_credential_message"] = str(
+        platform_oauth.get("credential_message") or ""
+    )
     if not out.get("registration_password") and out.get("extra_json"):
         try:
             extra = json.loads(out["extra_json"])
@@ -969,6 +1024,190 @@ def recover_interrupted_token_refreshes() -> int:
         if recovered:
             _save_accounts(accounts)
         return recovered
+
+
+def get_account_platform_oauth_context(acc_id: int) -> dict | None:
+    """供后端刷新服务读取当前凭证；调用方不得把返回值直接序列化到 API。"""
+    with _LOCK:
+        row = next((item for item in _load_accounts() if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return None
+        _extra, oauth = _account_platform_oauth(row)
+        decorated = _decorate_account(row)
+        return {
+            "id": int(row.get("id") or 0),
+            "email": str(row.get("email") or ""),
+            "access_token": str(row.get("access_token") or ""),
+            "registration_password": str(decorated.get("registration_password") or ""),
+            "platform_oauth": oauth,
+        }
+
+
+def claim_account_platform_oauth_refresh(acc_id: int, trigger: str = "manual") -> bool:
+    """原子占用 Platform OAuth 刷新任务；无 RT 或已有活跃任务时返回 False。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((item for item in accounts if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        extra, oauth = _account_platform_oauth(row)
+        if not str(oauth.get("refresh_token") or "").strip():
+            return False
+        current_status = str(oauth.get("refresh_status") or "")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "refresh_queued_at" if current_status == "queued" else "refresh_started_at"
+                stale_after = (
+                    _PLATFORM_OAUTH_REFRESH_QUEUE_STALE_SECONDS
+                    if current_status == "queued"
+                    else _PLATFORM_OAUTH_REFRESH_STALE_SECONDS
+                )
+                started_at = datetime.fromisoformat(str(oauth.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:  # noqa: DTZ005
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        oauth.update({
+            "refresh_status": "queued",
+            "refresh_trigger": str(trigger or "manual"),
+            "refresh_queued_at": now,
+            "refresh_started_at": None,
+            "refresh_message": "已加入 OAuth 刷新队列",
+        })
+        _store_account_platform_oauth(row, extra, oauth)
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def mark_account_platform_oauth_refresh_running(acc_id: int) -> bool:
+    """把已排队的 Platform OAuth 刷新任务标记为运行中。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((item for item in accounts if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        extra, oauth = _account_platform_oauth(row)
+        if oauth.get("refresh_status") not in {"queued", "running"}:
+            return False
+        now = _now()
+        oauth["refresh_status"] = "running"
+        oauth["refresh_started_at"] = now
+        oauth["refresh_message"] = "正在刷新 OAuth Token"
+        _store_account_platform_oauth(row, extra, oauth)
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def complete_account_platform_oauth_refresh(acc_id: int, result: dict | None = None) -> bool:
+    """保存 OAuth 刷新结果；失败时保留全部现有凭证。"""
+    result = result if isinstance(result, dict) else {}
+    tokens = result.get("tokens") if isinstance(result.get("tokens"), dict) else {}
+    ok = bool(result.get("ok")) and bool(str(tokens.get("access_token") or "").strip())
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((item for item in accounts if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        extra, oauth = _account_platform_oauth(row)
+        now = _now()
+        if ok:
+            for key in ("access_token", "refresh_token", "id_token", "token_type"):
+                value = str(tokens.get(key) or "").strip()
+                if value:
+                    oauth[key] = value
+            if tokens.get("expires_in") is not None:
+                try:
+                    oauth["expires_in"] = int(tokens.get("expires_in") or 0)
+                except (TypeError, ValueError):
+                    pass
+            oauth["refresh_status"] = "success"
+            oauth["refresh_message"] = str(result.get("message") or "OAuth Token 刷新成功")[:300]
+            oauth["upload_status"] = "pending"
+            oauth["upload_message"] = "等待同步 chatgpt2api"
+        else:
+            oauth["refresh_status"] = "failed"
+            oauth["refresh_message"] = str(
+                result.get("error") or result.get("message") or "OAuth Token 刷新失败"
+            )[:300]
+        oauth["refreshed_at"] = now
+        _store_account_platform_oauth(row, extra, oauth)
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def update_account_platform_oauth_sync_result(
+    acc_id: int,
+    *,
+    credential_result: dict | None = None,
+    upload_result: dict | None = None,
+) -> bool:
+    """保存 Codex 文件和 chatgpt2api 同步结果，不修改 OAuth 凭证。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((item for item in accounts if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        extra, oauth = _account_platform_oauth(row)
+        if isinstance(credential_result, dict):
+            oauth["credential_status"] = str(credential_result.get("status") or "failed")
+            oauth["credential_message"] = str(
+                credential_result.get("message") or credential_result.get("error") or ""
+            )[:300]
+        if isinstance(upload_result, dict):
+            oauth["upload_status"] = str(upload_result.get("status") or "failed")
+            oauth["upload_message"] = str(
+                upload_result.get("message") or upload_result.get("error") or ""
+            )[:300]
+        now = _now()
+        _store_account_platform_oauth(row, extra, oauth)
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def recover_interrupted_platform_oauth_refreshes() -> int:
+    """服务启动时把遗留的 Platform OAuth 刷新任务恢复为失败。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in accounts:
+            extra, oauth = _account_platform_oauth(row)
+            if oauth.get("refresh_status") not in {"queued", "running"}:
+                continue
+            oauth["refresh_status"] = "failed"
+            oauth["refresh_message"] = "WebUI 重启导致 OAuth 刷新中断，请重新刷新"
+            oauth["refreshed_at"] = now
+            _store_account_platform_oauth(row, extra, oauth)
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(accounts)
+        return recovered
+
+
+def list_account_platform_oauth_statuses(limit: int = 5000) -> dict:
+    """返回不含任何 Token 的 Platform OAuth 轻量状态快照。"""
+    fields = (
+        "id", "email", "updated_at", "platform_oauth_has_refresh_token",
+        "platform_oauth_refresh_status", "platform_oauth_refresh_message",
+        "platform_oauth_refresh_queued_at", "platform_oauth_refresh_started_at",
+        "platform_oauth_refreshed_at", "platform_oauth_upload_status",
+        "platform_oauth_upload_message", "platform_oauth_credential_status",
+        "platform_oauth_credential_message",
+    )
+    with _LOCK:
+        rows = sorted(_load_accounts(), key=lambda item: int(item.get("id") or 0), reverse=True)
+        items = []
+        for row in rows[:max(1, min(5000, int(limit)))]:
+            decorated = _decorate_account(row)
+            items.append({key: decorated.get(key) for key in fields})
+        latest = max((str(row.get("updated_at") or "") for row in rows), default="")
+        return {"items": items, "revision": f"{len(rows)}:{latest}"}
 
 
 def claim_account_plan_check(
@@ -2044,6 +2283,7 @@ def update_job(
     started_at: str | None = None,
     completed_at: str | None = None,
     account_id: int | None = None,
+    platform_oauth_snapshot: dict | None = None,
 ) -> None:
     with _LOCK:
         rows = _load_jobs()
@@ -2062,6 +2302,15 @@ def update_job(
             row["completed_at"] = completed_at
         if account_id is not None:
             row["account_id"] = account_id
+        if isinstance(platform_oauth_snapshot, dict):
+            for key in (
+                "platform_oauth_status",
+                "platform_oauth_has_refresh_token",
+                "platform_oauth_message",
+                "platform_oauth_completed_at",
+            ):
+                if key in platform_oauth_snapshot:
+                    row[key] = platform_oauth_snapshot[key]
         _save_jobs(rows)
 
 

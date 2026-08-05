@@ -54,6 +54,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_token_refreshes = db.recover_interrupted_token_refreshes()
     if recovered_token_refreshes:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的 Token 更新状态", recovered_token_refreshes)
+    recovered_oauth_refreshes = db.recover_interrupted_platform_oauth_refreshes()
+    if recovered_oauth_refreshes:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的 OAuth 刷新状态", recovered_oauth_refreshes)
 
     # ----------------------------------------------------------
     # 页面
@@ -100,7 +103,11 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.get("/api/accounts")
     def api_accounts():
         limit = request.args.get("limit", default=500, type=int)
-        return jsonify(db.list_accounts(limit=limit))
+        rows = db.list_accounts(limit=limit)
+        for row in rows:
+            # extra_json 内含 Platform OAuth AT/RT/ID Token；前端只使用装饰后的安全状态字段。
+            row.pop("extra_json", None)
+        return jsonify(rows)
 
     @app.get("/api/account-groups")
     def api_account_groups():
@@ -137,6 +144,12 @@ def create_app(auth_code: str | None = None) -> Flask:
         snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)))
         snapshot["queue"] = plan_check_service.queue_settings()
         return jsonify(snapshot)
+
+    @app.get("/api/accounts/oauth-refresh-status")
+    def api_account_oauth_refresh_status():
+        """当前 Platform OAuth 轻量状态，不返回 AT、RT、ID Token。"""
+        limit = request.args.get("limit", default=2000, type=int)
+        return jsonify(db.list_account_platform_oauth_statuses(limit=max(1, min(5000, limit))))
 
     @app.post("/api/accounts/<int:acc_id>/delete")
     def api_account_delete(acc_id: int):
@@ -282,6 +295,69 @@ def create_app(auth_code: str | None = None) -> Flask:
             "ok": True,
             "message": f"已开始更新 {len(selected)} 个账号 Token，并发 {workers}",
             "started": [{"id": item["id"], "email": item["email"]} for item in selected],
+            "started_count": len(selected),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+            **batch,
+        }), 202
+
+
+    @app.post("/api/accounts/oauth-refresh-bulk")
+    def api_accounts_oauth_refresh_bulk():
+        """使用现有 Platform RT 刷新选中账号，并同步 Codex/chatgpt2api。"""
+        from core import platform_oauth_refresh_service
+
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多选择 500 个账号"}), 400
+
+        selected = []
+        skipped = []
+        seen_ids = set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen_ids:
+                continue
+            seen_ids.add(acc_id)
+            account = db.get_account(acc_id)
+            if not account:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            email = str(account.get("email") or "").strip()
+            if not account.get("platform_oauth_has_refresh_token"):
+                skipped.append({"id": acc_id, "email": email, "reason": "账号没有 Platform RT"})
+                continue
+            if not db.claim_account_platform_oauth_refresh(acc_id, trigger="manual_bulk"):
+                skipped.append({"id": acc_id, "email": email, "reason": "OAuth 刷新中"})
+                continue
+            selected.append({"id": acc_id, "email": email})
+
+        if not selected:
+            return jsonify({
+                "ok": False,
+                "error": "没有可刷新 OAuth 的账号",
+                "skipped": skipped,
+                "skipped_count": len(skipped),
+            }), 409
+        try:
+            batch = platform_oauth_refresh_service.start_batch(selected, 3)
+        except Exception as exc:  # noqa: BLE001 - 后台线程启动异常必须转换为 API 错误
+            return jsonify({
+                "ok": False,
+                "error": f"OAuth 刷新任务启动失败: {type(exc).__name__}: {exc}",
+                "skipped": skipped,
+            }), 500
+        return jsonify({
+            "ok": True,
+            "message": f"已开始刷新 {len(selected)} 个账号 OAuth",
+            "started": selected,
             "started_count": len(selected),
             "skipped": skipped,
             "skipped_count": len(skipped),
@@ -1375,6 +1451,12 @@ def create_app(auth_code: str | None = None) -> Flask:
         rows = db.list_jobs(limit=limit)
         for row in rows:
             row["manual_otp_required"] = manual_otp_required
+            if not row.get("platform_oauth_status"):
+                row["platform_oauth_status"] = (
+                    "waiting"
+                    if row.get("status") in {"pending", "running", "stopping"}
+                    else "unknown"
+                )
             row.update(svc.get_retry_info(row))
         return jsonify(rows)
 

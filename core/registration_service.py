@@ -40,6 +40,40 @@ class StopRequested(RuntimeError):
     """用户手动停止注册任务。"""
 
 
+def platform_oauth_job_snapshot(
+    result: dict | None,
+    *,
+    completed_at: str | None = None,
+) -> dict:
+    """把注册阶段的 Platform OAuth 结果压缩成不含凭证的历史快照。"""
+    oauth = result if isinstance(result, dict) else {}
+    raw_status = str(oauth.get("status") or "").strip().lower()
+    has_refresh_token = bool(oauth.get("has_refresh_token")) or bool(
+        str(oauth.get("refresh_token") or "").strip()
+    )
+    if raw_status == "skipped":
+        status = "skipped"
+    elif raw_status == "failed":
+        status = "failed"
+    elif raw_status in {"success", "partial"}:
+        status = "success" if has_refresh_token else "missing"
+    else:
+        status = "not_reached"
+        has_refresh_token = False
+    message = str(oauth.get("message") or "").strip()
+    for key in ("access_token", "refresh_token", "id_token"):
+        secret = str(oauth.get(key) or "").strip()
+        if secret:
+            message = message.replace(secret, "[redacted]")
+    message = message[:300]
+    return {
+        "platform_oauth_status": status,
+        "platform_oauth_has_refresh_token": has_refresh_token,
+        "platform_oauth_message": message,
+        "platform_oauth_completed_at": completed_at or datetime.now().isoformat(timespec="seconds"),  # noqa: DTZ005
+    }
+
+
 def _activate_job(job_id: int) -> None:
     _THREAD_CTX.job_id = int(job_id)
     with _STOP_LOCK:
@@ -321,6 +355,7 @@ def _run_one_job(job_id: int, log_file: str) -> None:
     db.update_job(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
 
     email: str | None = None
+    registration_result: dict | None = None
     try:
         with _JobLogContext(log_file):
             from main import run_registration
@@ -329,6 +364,7 @@ def _run_one_job(job_id: int, log_file: str) -> None:
             db.update_job(job_id, email=email)
             check_stop_requested()
             result = run_registration(email=email, name=name, birthday=birthday)
+            registration_result = result if isinstance(result, dict) else None
             if is_stop_requested(job_id):
                 _release_unconsumed_job_email(email, "用户手动停止")
                 db.update_job(
@@ -336,6 +372,9 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     status="stopped",
                     error="用户手动停止",
                     completed_at=datetime.now().isoformat(timespec="seconds"),
+                    platform_oauth_snapshot=platform_oauth_job_snapshot(
+                        (registration_result or {}).get("platform_oauth")
+                    ),
                 )
                 log_logger.warning(f"[Job {job_id}] 已按用户请求停止")
                 return
@@ -347,6 +386,9 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     email=result.get("email"),
                     account_id=result.get("account_id"),
                     completed_at=datetime.now().isoformat(timespec="seconds"),
+                    platform_oauth_snapshot=platform_oauth_job_snapshot(
+                        result.get("platform_oauth")
+                    ),
                 )
                 log_logger.info(f"[Job {job_id}] 成功: {result.get('email')}")
             else:
@@ -362,6 +404,9 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     account_id=result_account_id,
                     error=str(err)[:500],
                     completed_at=datetime.now().isoformat(timespec="seconds"),
+                    platform_oauth_snapshot=platform_oauth_job_snapshot(
+                        registration_result.get("platform_oauth") if registration_result else None
+                    ),
                 )
                 email_to_handle = str(result_email or email or "").strip()
                 if _should_disable_failed_registration_email(err):
@@ -377,6 +422,9 @@ def _run_one_job(job_id: int, log_file: str) -> None:
             status="stopped",
             error="用户手动停止",
             completed_at=datetime.now().isoformat(timespec="seconds"),
+            platform_oauth_snapshot=platform_oauth_job_snapshot(
+                registration_result.get("platform_oauth") if registration_result else None
+            ),
         )
     except Exception as exc:
         err_text = f"{type(exc).__name__}: {exc}"
@@ -399,6 +447,9 @@ def _run_one_job(job_id: int, log_file: str) -> None:
             status="failed",
             error=f"{type(exc).__name__}: {exc}"[:500],
             completed_at=datetime.now().isoformat(timespec="seconds"),
+            platform_oauth_snapshot=platform_oauth_job_snapshot(
+                registration_result.get("platform_oauth") if registration_result else None
+            ),
         )
     finally:
         _deactivate_job(job_id)

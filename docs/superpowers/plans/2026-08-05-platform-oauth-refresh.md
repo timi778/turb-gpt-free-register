@@ -1,6 +1,6 @@
 # Platform OAuth Refresh Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Preserve the first Platform OAuth RT result on registration jobs and add safe current-RT status plus bulk OAuth refresh and immediate Codex/chatgpt2api synchronization to account management.
 
@@ -18,7 +18,7 @@
 - Modify: `webui/app.py:1370-1379`
 - Test: `tests/test_platform_oauth_job_status.py`
 
-- [ ] **Step 1: Write failing snapshot tests**
+- [x] **Step 1: Write failing snapshot tests**
 
 Create tests for a token-free mapping helper and job serializer. The assertions must cover `success`, `partial` without RT as `missing`, `failed`, `skipped`, missing result as `not_reached`, and completed legacy jobs as `unknown`.
 
@@ -36,13 +36,13 @@ def test_platform_oauth_snapshot_never_copies_tokens():
     assert "secret" not in repr(snapshot)
 ```
 
-- [ ] **Step 2: Run the new tests and verify they fail**
+- [x] **Step 2: Run the new tests and verify they fail**
 
 Run: `pytest -q tests/test_platform_oauth_job_status.py`
 
 Expected: failure because `platform_oauth_job_snapshot` and the new job fields do not exist.
 
-- [ ] **Step 3: Add an allowlisted job snapshot update**
+- [x] **Step 3: Add an allowlisted job snapshot update**
 
 Extend `db.update_job` with `platform_oauth_snapshot: dict | None = None`. Copy only these keys into the task row:
 
@@ -59,21 +59,21 @@ for key in (
 
 Add `registration_service.platform_oauth_job_snapshot(result, completed_at=None)`. Map the result status to the fixed history enum, truncate the message, and never copy credential values.
 
-- [ ] **Step 4: Save the snapshot on every terminal job path**
+- [x] **Step 4: Save the snapshot on every terminal job path**
 
 When `run_registration` returns, pass its `platform_oauth` result to the helper for success, failed, and stopped outcomes. Exception paths that have no registration result use `not_reached`. Do not alter retry/Codex task semantics.
 
-- [ ] **Step 5: Return safe history state from `/api/jobs`**
+- [x] **Step 5: Return safe history state from `/api/jobs`**
 
 For jobs with no snapshot, set `platform_oauth_status` to `waiting` while the task is pending/running/stopping and `unknown` after a terminal state. Do not infer old history from `account_id`.
 
-- [ ] **Step 6: Run the snapshot tests**
+- [x] **Step 6: Run the snapshot tests**
 
 Run: `pytest -q tests/test_platform_oauth_job_status.py tests/test_platform_oauth.py`
 
 Expected: all tests pass.
 
-- [ ] **Step 7: Commit the history slice**
+- [x] **Step 7: Commit the history slice**
 
 ```powershell
 git add core/db.py core/registration_service.py webui/app.py tests/test_platform_oauth_job_status.py
@@ -87,7 +87,7 @@ git commit -m "feat: preserve registration OAuth RT history"
 - Modify: `core/db.py:875-975`
 - Test: `tests/test_platform_oauth_refresh.py`
 
-- [ ] **Step 1: Write failing account-state tests**
+- [x] **Step 1: Write failing account-state tests**
 
 Use temporary account JSON storage or patch `_load_accounts`/`_save_accounts`. Cover safe decoration, active-claim exclusion, missing RT, stale claims, successful token merge, omitted-token preservation, and failure preservation.
 
@@ -105,13 +105,13 @@ def test_complete_refresh_preserves_omitted_refresh_token():
     assert oauth["refresh_token"] == "old-rt"
 ```
 
-- [ ] **Step 2: Run the tests and verify they fail**
+- [x] **Step 2: Run the tests and verify they fail**
 
 Run: `pytest -q tests/test_platform_oauth_refresh.py -k "account or complete or claim"`
 
 Expected: missing persistence helpers and safe account fields.
 
-- [ ] **Step 3: Implement OAuth JSON helpers and safe decoration**
+- [x] **Step 3: Implement OAuth JSON helpers and safe decoration**
 
 Add private parse/write helpers that preserve unrelated `extra_json` keys. `_decorate_account` exposes only:
 
@@ -126,11 +126,11 @@ out["platform_oauth_upload_message"] = oauth.get("upload_message") or ""
 
 Do not add raw Platform AT, RT, or ID Token fields to decorated output.
 
-- [ ] **Step 4: Implement claim, running, completion, and interrupted recovery helpers**
+- [x] **Step 4: Implement claim, running, completion, and interrupted recovery helpers**
 
 Add `claim_account_platform_oauth_refresh`, `mark_account_platform_oauth_refresh_running`, `complete_account_platform_oauth_refresh`, `update_account_platform_oauth_sync_result`, and `recover_interrupted_platform_oauth_refreshes`. Store execution metadata inside `extra_json.platform_oauth`; use the existing queue/running stale-time constants.
 
-- [ ] **Step 5: Run account-state tests**
+- [x] **Step 5: Run account-state tests**
 
 Run: `pytest -q tests/test_platform_oauth_refresh.py -k "account or complete or claim"`
 
@@ -143,7 +143,7 @@ Expected: all selected tests pass.
 - Modify: `core/codex_oauth.py:992-1003`
 - Test: `tests/test_platform_oauth_refresh.py`
 
-- [ ] **Step 1: Write failing exchange and synchronization tests**
+- [x] **Step 1: Write failing exchange and synchronization tests**
 
 Mock `requests.Session.post`, Codex persistence, and `chatgpt2api_client.upload_account`. Cover a rotated RT, a response without RT, `invalid_grant`, timeout, malformed JSON, no automatic exchange retry, Codex file failure, upload failure, and one-account failure not stopping a batch.
 
@@ -161,17 +161,17 @@ def test_exchange_posts_refresh_grant_once(mock_post):
     assert mock_post.call_args.kwargs["data"]["grant_type"] == "refresh_token"
 ```
 
-- [ ] **Step 2: Run service tests and verify they fail**
+- [x] **Step 2: Run service tests and verify they fail**
 
 Run: `pytest -q tests/test_platform_oauth_refresh.py -k "exchange or upload or codex or batch"`
 
 Expected: module or functions are missing.
 
-- [ ] **Step 3: Implement a single-attempt refresh exchange**
+- [x] **Step 3: Implement a single-attempt refresh exchange**
 
 `exchange_refresh_token` posts form data to `PLATFORM_TOKEN_URL` with `PLATFORM_CLIENT_ID`, a finite timeout, and no retry adapter. It validates a 2xx JSON response with an access token and raises a safe error containing the OAuth error code but no submitted token.
 
-- [ ] **Step 4: Implement per-account orchestration**
+- [x] **Step 4: Implement per-account orchestration**
 
 The worker marks the account running, exchanges the current RT, merges omitted values, persists the account, builds a Codex storage object from the merged credentials, writes it, and uploads with:
 
@@ -186,21 +186,21 @@ chatgpt2api_client.upload_account(
 
 Persist Codex-file and upload results separately. A failed upload must not roll back the OAuth result.
 
-- [ ] **Step 5: Make Codex credential writes atomic**
+- [x] **Step 5: Make Codex credential writes atomic**
 
 Write JSON to a sibling temporary file, then replace the destination. Always remove a leftover temporary file in `finally`. Preserve the existing filename rules and return value.
 
-- [ ] **Step 6: Implement bounded asynchronous batches**
+- [x] **Step 6: Implement bounded asynchronous batches**
 
 `start_batch(items, workers=3)` caps workers at 3, creates a daemon dispatcher, and catches each future independently. Startup failure completes all claimed accounts as failed.
 
-- [ ] **Step 7: Run service tests**
+- [x] **Step 7: Run service tests**
 
 Run: `pytest -q tests/test_platform_oauth_refresh.py tests/test_chatgpt2api_integration.py tests/test_platform_oauth.py`
 
 Expected: all tests pass.
 
-- [ ] **Step 8: Commit the backend refresh slice**
+- [x] **Step 8: Commit the backend refresh slice**
 
 ```powershell
 git add core/db.py core/platform_oauth_refresh_service.py core/codex_oauth.py tests/test_platform_oauth_refresh.py
@@ -215,7 +215,7 @@ git commit -m "feat: refresh platform OAuth credentials"
 - Modify: `core/db.py:1235-1270`
 - Test: `tests/test_platform_oauth_refresh.py`
 
-- [ ] **Step 1: Write failing Flask endpoint tests**
+- [x] **Step 1: Write failing Flask endpoint tests**
 
 Cover empty and oversized ID lists, invalid IDs, missing accounts, no RT, active refresh, accepted accounts, a hard worker cap of 3, `202` responses, and a status response that contains no raw token values.
 
@@ -228,25 +228,25 @@ def test_oauth_refresh_bulk_never_returns_tokens(client):
     assert "old-at" not in json.dumps(body)
 ```
 
-- [ ] **Step 2: Run endpoint tests and verify they fail**
+- [x] **Step 2: Run endpoint tests and verify they fail**
 
 Run: `pytest -q tests/test_platform_oauth_refresh.py -k "api or endpoint"`
 
 Expected: endpoints return 404.
 
-- [ ] **Step 3: Add the bulk start endpoint**
+- [x] **Step 3: Add the bulk start endpoint**
 
 Add `POST /api/accounts/oauth-refresh-bulk`. Deduplicate IDs, cap the request at 500 accounts, skip accounts without a current RT, claim accepted accounts atomically, and always call the service with `workers=3` regardless of untrusted client input.
 
-- [ ] **Step 4: Add the safe status endpoint**
+- [x] **Step 4: Add the safe status endpoint**
 
 Add `GET /api/accounts/oauth-refresh-status?limit=2000`, backed by an allowlisted DB status snapshot. Fields include identity, current RT presence, refresh state/message/timestamps, and upload state/message only.
 
-- [ ] **Step 5: Recover interrupted OAuth batches on app startup**
+- [x] **Step 5: Recover interrupted OAuth batches on app startup**
 
 Invoke `recover_interrupted_platform_oauth_refreshes` next to the existing interrupted task recovery so queued/running rows become failed after a WebUI restart.
 
-- [ ] **Step 6: Run endpoint tests**
+- [x] **Step 6: Run endpoint tests**
 
 Run: `pytest -q tests/test_platform_oauth_refresh.py -k "api or endpoint or recover"`
 
@@ -263,35 +263,35 @@ Expected: all selected tests pass.
 - Modify: `webui/templates/index.html:2062-2092`
 - Test: `tests/test_platform_oauth_webui.py`
 
-- [ ] **Step 1: Write failing template contract tests**
+- [x] **Step 1: Write failing template contract tests**
 
 Assert the template contains the `首次 RT` and `当前 RT` columns, all agreed status labels, `btnRefreshSelectedOAuth`, the bulk endpoint, status endpoint, and selection-state wiring.
 
-- [ ] **Step 2: Run the WebUI tests and verify they fail**
+- [x] **Step 2: Run the WebUI tests and verify they fail**
 
 Run: `pytest -q tests/test_platform_oauth_webui.py`
 
 Expected: required labels and controls are absent.
 
-- [ ] **Step 3: Add the registration-history column**
+- [x] **Step 3: Add the registration-history column**
 
 Render `waiting` as `等待中`, `success` as `已获取`, `missing` as `未返回`, `failed` as `OAuth 失败`, `skipped` as `已跳过`, `not_reached` as `未执行`, and `unknown` as `未知`. Update empty-row `colspan`.
 
-- [ ] **Step 4: Add current RT account status**
+- [x] **Step 4: Add current RT account status**
 
 Merge the safe OAuth status snapshot into `ACCOUNTS` during polling. Render `刷新中` for queued/running, `刷新失败` for failed, otherwise `有 RT` or `无 RT`. Put only the safe message and timestamp in the title.
 
-- [ ] **Step 5: Add the bulk action**
+- [x] **Step 5: Add the bulk action**
 
 Add the `刷新 OAuth` toolbar button, disable it with no selection, submit selected IDs, report started/skipped counts, reload account state, and keep polling while any selected account is queued/running.
 
-- [ ] **Step 6: Run WebUI and API tests**
+- [x] **Step 6: Run WebUI and API tests**
 
 Run: `pytest -q tests/test_platform_oauth_webui.py tests/test_platform_oauth_refresh.py`
 
 Expected: all tests pass.
 
-- [ ] **Step 7: Commit the WebUI slice**
+- [x] **Step 7: Commit the WebUI slice**
 
 ```powershell
 git add webui/app.py webui/templates/index.html tests/test_platform_oauth_webui.py tests/test_platform_oauth_refresh.py
@@ -305,11 +305,11 @@ git commit -m "feat: expose OAuth RT history and refresh controls"
 - Modify: `docs/superpowers/specs/2026-08-05-platform-oauth-refresh-design.md`
 - Modify: `docs/superpowers/plans/2026-08-05-platform-oauth-refresh.md`
 
-- [ ] **Step 1: Document the user-visible behavior**
+- [x] **Step 1: Document the user-visible behavior**
 
 Describe the separate meanings of task `首次 RT` and account `当前 RT`, the selected-account bulk action, no-browser `invalid_grant` behavior, immediate chatgpt2api synchronization, and the fact that old jobs show `未知`.
 
-- [ ] **Step 2: Run focused regression tests**
+- [x] **Step 2: Run focused regression tests**
 
 Run:
 
@@ -319,7 +319,7 @@ pytest -q tests/test_platform_oauth_job_status.py tests/test_platform_oauth_refr
 
 Expected: all tests pass.
 
-- [ ] **Step 3: Run the full project checks**
+- [x] **Step 3: Run the full project checks**
 
 Run:
 
@@ -330,11 +330,11 @@ ruff check .
 
 Expected: both commands exit 0. Report any unavailable or confirmed pre-existing failures separately.
 
-- [ ] **Step 4: Perform a credential-leak audit**
+- [x] **Step 4: Perform a credential-leak audit**
 
 Inspect staged diffs and test output. Confirm no `.env`, account JSON, task JSON, Codex credential, token, password, cookie, browser profile, or runtime log is staged. Search new API serializers and logs for raw credential output.
 
-- [ ] **Step 5: Commit documentation and final adjustments**
+- [x] **Step 5: Commit documentation and final adjustments**
 
 ```powershell
 git add README.md docs/superpowers/specs/2026-08-05-platform-oauth-refresh-design.md docs/superpowers/plans/2026-08-05-platform-oauth-refresh.md
