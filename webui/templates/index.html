@@ -140,7 +140,7 @@
     .accounts-table .col-plan { width: 340px; }
     .accounts-table .col-note { width: 180px; }
     .accounts-table .col-actions { width: 460px; }
-    .accounts-table td:nth-child(8), .accounts-table th:nth-child(8) { overflow: visible; text-overflow: clip; }
+    .accounts-table td:nth-child(9), .accounts-table th:nth-child(9) { overflow: visible; text-overflow: clip; }
     .token-countdown { min-width: 126px; font-variant-numeric: tabular-nums; }
     .token-refresh-status { white-space: nowrap; }
     .outlook-table .col-actions { width: 220px; }
@@ -394,12 +394,12 @@
       <div class="table-wrap">
         <table class="jobs-table">
           <colgroup>
-            <col class="col-check"><col class="col-id"><col class="col-status"><col class="col-email">
+            <col class="col-check"><col class="col-id"><col class="col-status"><col class="col-status"><col class="col-email">
             <col class="col-time"><col class="col-time"><col class="col-error"><col class="col-actions">
           </colgroup>
           <thead><tr>
             <th><input type="checkbox" id="jobsSelectAll" title="全选/取消全选当前页可删除任务"></th>
-            <th>ID</th><th>状态</th><th>邮箱</th><th>开始</th><th>完成</th><th class="wrap">错误</th><th>操作</th>
+            <th>ID</th><th>状态</th><th>首次 RT</th><th>邮箱</th><th>开始</th><th>完成</th><th class="wrap">错误</th><th>操作</th>
           </tr></thead>
           <tbody id="jobsBody"></tbody>
         </table>
@@ -429,6 +429,7 @@
             <input id="tokenRefreshWorkers" type="number" min="1" max="16" value="3">
           </label>
           <button class="btn primary" id="btnRefreshSelectedTokens" disabled title="使用已保存的账号密码，通过 Roxy 登录 ChatGPT 并更新选中账号的 accessToken">更新选中Token</button>
+          <button class="btn good" id="btnRefreshSelectedOAuth" disabled title="使用选中账号现有的 Platform RT 刷新 OAuth Token，并同步 Codex 凭证和 chatgpt2api">刷新 OAuth</button>
           <button class="btn primary" id="btnCheckSelectedPlans" disabled title="查询选中账号当前套餐；free 账号会检查 Plus 试用资格">查询选中套餐</button>
           <button class="btn good" id="btnExtractSelectedLinks" disabled title="给选中的 free(可Plus试用) 账号批量提链，类型按配置 PIX/UPI">批量提链</button>
           <button class="btn primary" id="btnRetrySelectedCodex" disabled title="给选中的账号批量补跑 Codex 授权">批量补跑 Codex</button>
@@ -447,10 +448,10 @@
       </div>
       <div class="table-wrap">
         <table class="accounts-table">
-          <colgroup><col class="col-check"><col class="col-id"><col class="col-email"><col class="col-source"><col class="col-token"><col class="col-token"><col class="col-token-life"><col class="col-plan"><col class="col-note"><col class="col-small"><col class="col-status"><col class="col-time"><col class="col-actions"></colgroup>
+          <colgroup><col class="col-check"><col class="col-id"><col class="col-email"><col class="col-source"><col class="col-token"><col class="col-token"><col class="col-token-life"><col class="col-status"><col class="col-plan"><col class="col-note"><col class="col-small"><col class="col-status"><col class="col-time"><col class="col-actions"></colgroup>
           <thead><tr>
             <th><input type="checkbox" id="accountsSelectAll" title="全选/取消全选当前页账号"></th>
-            <th>ID</th><th>邮箱</th><th>来源</th><th>Token</th><th>账号密码</th><th>Token时效</th><th>套餐</th><th>备注</th><th>2FA</th><th>Codex</th><th>创建时间</th><th>操作</th>
+            <th>ID</th><th>邮箱</th><th>来源</th><th>Token</th><th>账号密码</th><th>Token时效</th><th>当前 RT</th><th>套餐</th><th>备注</th><th>2FA</th><th>Codex</th><th>创建时间</th><th>操作</th>
           </tr></thead>
           <tbody id="accountsBody"></tbody>
         </table>
@@ -791,6 +792,21 @@ $('#btnCancelPending').addEventListener('click', async () => {
   finally { $('#btnCancelPending').disabled = false; }
 });
 
+function _platformOAuthJobCell(job) {
+  const status = job.platform_oauth_status || 'unknown';
+  const meta = {
+    waiting: ['等待中', 'status-running'],
+    success: ['已获取', 'status-success'],
+    missing: ['未返回', 'status-failed'],
+    failed: ['OAuth 失败', 'status-failed'],
+    skipped: ['已跳过', 'status-used'],
+    not_reached: ['未执行', 'status-used'],
+    unknown: ['未知', 'status-used'],
+  }[status] || ['未知', 'status-used'];
+  const title = [job.platform_oauth_message || '', job.platform_oauth_completed_at || ''].filter(Boolean).join('；');
+  return `<span class="pill ${meta[1]}" title="${esc(title)}">${meta[0]}</span>`;
+}
+
 function renderJobs() {
   const p = PAGERS.jobs;
   const total = JOBS.length;
@@ -804,6 +820,7 @@ function renderJobs() {
       <td><input type="checkbox" class="job-row-check" data-job-id="${esc(j.id)}" ${JOB_SELECTED.has(Number(j.id)) ? 'checked' : ''} ${['running','stopping'].includes(j.status) ? 'disabled title="运行中的任务不能选择"' : ''}></td>
       <td class="muted">#${esc(j.id)}${j.parent_job_id ? `<div class="sub-cell" title="重试自任务 #${esc(j.parent_job_id)}">↳ #${esc(j.parent_job_id)} · ${esc(j.retry_attempt || 1)}</div>` : ''}</td>
       <td>${pill(j.display_status || j.status)}</td>
+      <td>${_platformOAuthJobCell(j)}</td>
       <td title="${esc(j.email || '-')}">${esc(j.email || '-')}</td>
       <td class="muted" title="${esc(j.started_at || '-')}">${esc(j.started_at || '-')}</td>
       <td class="muted" title="${esc(j.completed_at || '-')}">${esc(j.completed_at || '-')}</td>
@@ -820,7 +837,7 @@ function renderJobs() {
           <button class="danger" data-delete-job="${esc(j.id)}" ${['running','stopping'].includes(j.status) ? 'disabled title="运行中的任务不能删除；如需删除请先停止"' : ''}>删除</button>
         </div>
       </td>
-    </tr>`).join('') || '<tr><td colspan="8" class="muted">暂无任务</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="9" class="muted">暂无任务</td></tr>';
   updateJobsSelectionUi(rows);
   _renderPager('jobs', total);
 }
@@ -1152,11 +1169,13 @@ async function loadAccounts() {
   if (accountsLoading) return;
   accountsLoading = true;
   try {
-    const [accounts, groups] = await Promise.all([
+    const [accounts, groups, oauthSnapshot] = await Promise.all([
       api('/api/accounts?limit=2000'),
       api('/api/account-groups?include_empty=1'),
+      api('/api/accounts/oauth-refresh-status?limit=2000'),
     ]);
-    ACCOUNTS = accounts;
+    const oauthById = new Map((oauthSnapshot.items || []).map(item => [Number(item.id), item]));
+    ACCOUNTS = accounts.map(account => Object.assign(account, oauthById.get(Number(account.id)) || {}));
     ACCOUNT_GROUPS = groups;
     renderAccountGroupTabs();
     renderAccounts();
@@ -1293,6 +1312,29 @@ function _codexCell(r) {
   if (s === 'skipped') return `<span class="pill status-used">已跳过</span>`;
   if (s === 'deactivated') return `<span class="pill status-failed" title="账号已被 OpenAI 删除/停用/封禁，无法授权">已废号</span>`;
   return `<span class="muted">-</span>`;
+}
+function _platformOAuthCell(r) {
+  const status = r.platform_oauth_refresh_status || 'never';
+  const hasRt = !!r.platform_oauth_has_refresh_token;
+  let label = hasRt ? '有 RT' : '无 RT';
+  let cls = hasRt ? 'status-success' : 'status-used';
+  if (['queued', 'running'].includes(status)) {
+    label = '刷新中';
+    cls = 'status-running';
+  } else if (status === 'failed') {
+    label = '刷新失败';
+    cls = 'status-failed';
+  }
+  const details = [
+    r.platform_oauth_refresh_message || '',
+    r.platform_oauth_refreshed_at ? `时间: ${r.platform_oauth_refreshed_at}` : '',
+    r.platform_oauth_credential_status === 'failed' ? `Codex: ${r.platform_oauth_credential_message || '写入失败'}` : '',
+    r.platform_oauth_upload_status === 'failed' ? `chatgpt2api: ${r.platform_oauth_upload_message || '上传失败'}` : '',
+  ].filter(Boolean).join('；');
+  const uploadHtml = r.platform_oauth_upload_status === 'failed'
+    ? '<div class="sub-cell" style="color:var(--red);">上传失败</div>'
+    : '';
+  return `<span class="pill ${cls}" title="${esc(details)}">${label}</span>${uploadHtml}`;
 }
 function _tokenRemainingText(seconds) {
   const n = Math.floor(Number(seconds));
@@ -1503,13 +1545,14 @@ function renderAccounts() {
       <td><span class="mono" title="${esc(r.access_token || '')}">${esc(short(r.access_token || '', 10))}</span></td>
       <td><span class="mono" title="${r.registration_password ? '密码已保存' : '未设置或设置失败'}">${r.registration_password ? '******' : '<span class="muted">-</span>'}</span></td>
       <td>${_tokenLifetimeCell(r)}</td>
+      <td>${_platformOAuthCell(r)}</td>
       <td>${_planCell(r)}<div class="sub-cell">${_extractLinkCell(r)}</div></td>
       <td class="wrap" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="muted">-</span>'}</td>
       <td>${r.totp_secret ? '已启用' : '<span class="muted">未启用</span>'}</td>
       <td>${_codexCell(r)}</td>
       <td class="muted">${esc(r.created_at || '-')}</td>
       <td class="actions">${cbtn('复制Token', r.access_token, 'primary')} ${cbtn('复制密码', r.registration_password)} ${cbtn('复制整行', r.copy_line, 'good')} <button data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button> ${_planAction(r)} ${_extractLinkAction(r)} ${_codexAction(r)} <button data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button> <button class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button></td>
-    </tr>`).join('') || '<tr><td colspan="13" class="muted">暂无账号</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="14" class="muted">暂无账号</td></tr>';
   updateAccountSelectionUi(rows);
   updateTokenCountdowns();
   _renderPager('accounts', total);
@@ -1524,6 +1567,7 @@ function updateAccountSelectionUi(pageRows = null) {
   const extractLinksBtn = $('#btnExtractSelectedLinks');
   const checkPlanBtn = $('#btnCheckSelectedPlans');
   const refreshTokensBtn = $('#btnRefreshSelectedTokens');
+  const refreshOAuthBtn = $('#btnRefreshSelectedOAuth');
   const copySelectedBtn = $('#btnCopySelectedLines');
   const downloadTxtBtn = $('#btnDownloadSelectedTxt');
   const copySelectedPasswordsBtn = $('#btnCopySelectedPasswords');
@@ -1537,6 +1581,13 @@ function updateAccountSelectionUi(pageRows = null) {
   if (extractLinksBtn) extractLinksBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (checkPlanBtn) checkPlanBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (refreshTokensBtn) refreshTokensBtn.disabled = ACCOUNT_SELECTED.size === 0;
+  if (refreshOAuthBtn) {
+    const selectedOAuthBusy = ACCOUNTS.some(account =>
+      ACCOUNT_SELECTED.has(Number(account.id))
+      && ['queued', 'running'].includes(account.platform_oauth_refresh_status)
+    );
+    refreshOAuthBtn.disabled = ACCOUNT_SELECTED.size === 0 || selectedOAuthBusy;
+  }
   if (copySelectedBtn) copySelectedBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (downloadTxtBtn) downloadTxtBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (copySelectedPasswordsBtn) copySelectedPasswordsBtn.disabled = ACCOUNT_SELECTED.size === 0;
@@ -1701,6 +1752,7 @@ $('#accountsSelectAll').addEventListener('change', (e) => {
 });
 $('#btnDeleteSelectedAccounts').addEventListener('click', deleteSelectedAccounts);
 $('#btnRefreshSelectedTokens').addEventListener('click', refreshSelectedTokens);
+$('#btnRefreshSelectedOAuth').addEventListener('click', refreshSelectedOAuth);
 $('#btnCopySelectedLines').addEventListener('click', copySelectedAccountLines);
 $('#btnDownloadSelectedTxt').addEventListener('click', downloadSelectedAccountTxt);
 $('#btnCopySelectedPasswords').addEventListener('click', copySelectedAccountPasswords);
@@ -2086,6 +2138,45 @@ async function refreshSelectedTokens() {
   } catch(err) {
     const skippedCount = (err?.skipped || []).length;
     showToast('批量更新 Token 失败: ' + err.message);
+    updateAccountSelectionUi();
+  }
+}
+
+async function refreshSelectedOAuth() {
+  const ids = Array.from(ACCOUNT_SELECTED);
+  if (ids.length === 0) { showToast('请先选择账号'); return; }
+  const selectedAccounts = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
+  const missingRtCount = selectedAccounts.filter(a => !a.platform_oauth_has_refresh_token).length;
+  let message = `使用现有 Platform RT 刷新选中的 ${ids.length} 个账号 OAuth Token？\n\n成功后会更新本地 Codex 凭证，并立即同步 chatgpt2api。不会打开浏览器或触发邮箱 OTP。`;
+  if (missingRtCount) message += `\n\n其中 ${missingRtCount} 个账号没有 RT，会自动跳过。`;
+  if (!confirm(message)) return;
+
+  const btn = $('#btnRefreshSelectedOAuth');
+  btn.disabled = true;
+  try {
+    const result = await api('/api/accounts/oauth-refresh-bulk', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({account_ids: ids}),
+    });
+    const skippedCount = (result.skipped || []).length;
+    showToast(skippedCount
+      ? `已开始刷新 ${result.started_count || 0} 个，跳过 ${skippedCount} 个`
+      : (result.message || '已开始刷新 OAuth'));
+    await loadAccounts();
+    let polls = 0;
+    const poll = setInterval(async () => {
+      polls += 1;
+      await loadAccounts();
+      const active = ACCOUNTS.some(account =>
+        ACCOUNT_SELECTED.has(Number(account.id))
+        && ['queued', 'running'].includes(account.platform_oauth_refresh_status)
+      );
+      if (!active || polls >= 300) clearInterval(poll);
+    }, 3000);
+  } catch(err) {
+    showToast('批量刷新 OAuth 失败: ' + err.message);
+  } finally {
     updateAccountSelectionUi();
   }
 }
