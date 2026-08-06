@@ -8,13 +8,18 @@ import json
 import logging
 import re
 import secrets
+import time
 import uuid
 from dataclasses import dataclass
 from urllib.parse import parse_qs, unquote_plus, urlencode, urlparse
 
 from config import chatgpt2api as _cfg
+from core.openai_auth import _is_transient_network_error
 
 logger = logging.getLogger(__name__)
+
+_PLATFORM_OAUTH_NETWORK_RETRIES = 3
+_PLATFORM_OAUTH_RETRY_DELAY_SECONDS = 3.0
 
 PLATFORM_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
 PLATFORM_REDIRECT_URI = "https://platform.openai.com/auth/callback"
@@ -394,27 +399,54 @@ def finalize_platform_oauth(tokens: dict, email: str) -> dict:
 def _run(fetcher, email: str) -> dict:
     if not bool(getattr(_cfg, "ENABLE_PLATFORM_OAUTH", True)):
         return {"status": "skipped", "ok": False, "has_refresh_token": False, "message": "ENABLE_PLATFORM_OAUTH=False"}
-    try:
-        result = finalize_platform_oauth(fetcher(), email)
-        logger.info(
-            "[Platform OAuth] 完成: email=%s refresh_token=%s file=%s",
-            email,
-            "yes" if result.get("has_refresh_token") else "no",
-            result.get("file_path") or "-",
-        )
-        return result
-    except Exception as exc:
-        logger.warning(
-            "[Platform OAuth] 获取失败（保留 ChatGPT AT 并继续注册）: email=%s error=%s",
-            email,
-            f"{type(exc).__name__}: {str(exc)[:200]}",
-        )
-        return {
-            "status": "failed",
-            "ok": False,
-            "has_refresh_token": False,
-            "message": f"{type(exc).__name__}: {str(exc)[:220]}",
-        }
+
+    last_exc: Exception | None = None
+    retries_used = 0
+    for attempt in range(_PLATFORM_OAUTH_NETWORK_RETRIES + 1):
+        try:
+            result = finalize_platform_oauth(fetcher(), email)
+            logger.info(
+                "[Platform OAuth] 完成: email=%s refresh_token=%s file=%s",
+                email,
+                "yes" if result.get("has_refresh_token") else "no",
+                result.get("file_path") or "-",
+            )
+            return result
+        except Exception as exc:
+            last_exc = exc
+            if (
+                not _is_transient_network_error(exc)
+                or attempt >= _PLATFORM_OAUTH_NETWORK_RETRIES
+            ):
+                break
+
+            retries_used = attempt + 1
+            logger.warning(
+                "[Platform OAuth] 临时性网络错误，%.1fs 后重试: "
+                "email=%s retry=%s/%s error=%s",
+                _PLATFORM_OAUTH_RETRY_DELAY_SECONDS,
+                email,
+                retries_used,
+                _PLATFORM_OAUTH_NETWORK_RETRIES,
+                f"{type(exc).__name__}: {str(exc)[:200]}",
+            )
+            time.sleep(_PLATFORM_OAUTH_RETRY_DELAY_SECONDS)
+
+    exc = last_exc or RuntimeError("Platform OAuth 获取失败但没有异常记录")
+    logger.warning(
+        "[Platform OAuth] 获取失败（保留 ChatGPT AT 并继续注册）: "
+        "email=%s network_retries=%s/%s error=%s",
+        email,
+        retries_used,
+        _PLATFORM_OAUTH_NETWORK_RETRIES,
+        f"{type(exc).__name__}: {str(exc)[:200]}",
+    )
+    return {
+        "status": "failed",
+        "ok": False,
+        "has_refresh_token": False,
+        "message": f"{type(exc).__name__}: {str(exc)[:220]}",
+    }
 
 
 def run_platform_oauth_http(session, email: str) -> dict:

@@ -49,6 +49,7 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 - Cloudflare Worker 临时邮箱：自动创建 + JWT 取码（`cloudflare`，兼容 cloudflare_temp_email）
 - 通用 API 邮箱：`email----取码地址`
 - GPTMail 临时邮箱 API：运行时随机生成邮箱并自动收取验证码
+- Remail 接码平台：自动匹配 OpenAI/ChatGPT 项目，可选短效或长效邮箱并自动收取验证码
 - `EMAIL_SOURCE` 支持多个来源组合，例如：
 
 ```python
@@ -131,6 +132,9 @@ cp .env.example .env
 - `SKYVERN_API_KEY`
 - `ROXY_API_TOKEN`
 - `QQ_IMAP_PASSWORD`
+- `GPTMAIL_API_KEY`
+- `MAIL_NEST_API_KEY`
+- `REMAIL_API_KEY`
 - `CLOUDFLARE_API_KEY` / `CLOUDFLARE_CUSTOM_AUTH`（`EMAIL_SOURCE=cloudflare` 时）
 - `CPA_MANAGEMENT_KEY`
 - `CHATGPT2API_ADMIN_KEY`
@@ -252,6 +256,35 @@ Cloudflare Email Routing 需要把域名邮件转发到 QQ 邮箱。此模式不
 
 - `api-key`获取页面：https://mailnest.top/account
 - 项目代码获取页面：https://mailnest.top/buy-email。默认为`chatgpt001`，可以直接使用
+
+#### Remail 长效 / 短效邮箱
+
+在 WebUI 的「配置 → 邮箱 / OTP」填写 `Remail API Key`，并把邮箱来源设为：
+
+```dotenv
+USE_EMAIL_SERVICE=true
+EMAIL_SOURCE=remail
+REMAIL_API_KEY=你的_rk_API_Key
+REMAIL_SERVICE_MODE=code
+```
+
+服务地址固定为 `https://remail.aishop6.com`，接口说明见 [Remail API 文档](https://remail.aishop6.com/docs)。运行时会自动查询当前 Key 可见的 OpenAI/ChatGPT 项目，优先选择有库存的 Microsoft 邮箱商品，然后按所选模式创建订单并通过取件接口轮询验证码，无需手工填写项目 ID 或商品 ID。
+
+`REMAIL_SERVICE_MODE=code` 为短效接码（一次邮件，默认）；`REMAIL_SERVICE_MODE=purchase` 为长效购买（可重复收件）。客户端会分别检查商品的 `codeEnabled` / `purchaseEnabled`，并使用对应价格排序，只选择支持当前模式的商品。WebUI 的 Remail 子页提供下拉选项，也会自动显示当前消费余额、历史消费、订单数和钱包更新时间，可随时点击“刷新余额”。余额查询只读，不会创建订单。
+
+如果平台为你的项目使用了自定义名称，也可以在 WebUI 中填写可选的 `REMAIL_PROJECT_ID` / `REMAIL_PRODUCT_ID`，以跳过自动搜索。
+
+如需限制邮箱域名，可配置多个 `emailSuffix` 白名单值：
+
+```dotenv
+REMAIL_EMAIL_SUFFIXES=outlook.com,hotmail.com
+```
+
+WebUI 中可以每行填写一个。每次下单会先检查所选商品公布的 `suffixes` 及库存，只在仍有库存的已配置后缀中等概率随机选择一个，并作为单个 `emailSuffix` 传给 Remail；留空则由平台自动分配后缀。
+
+短效模式按平台规则只用于当前接码订单；无论选择哪种模式，当前注册流程都依赖进程内保存的 `serviceToken`，领取邮箱后应在同一运行进程内完成注册和收码。
+
+客户端默认优先直连 Remail，并在网络异常、SSL 中断或 HTTP `520`–`524` / `502`–`504` 时自动切换系统网络设置并退避重试。若多次重试后仍持续出现 `522`，表示平台源站当前不可达，需要等待服务恢复。
 
 ---
 

@@ -311,6 +311,21 @@
       border-radius: 8px; padding: 12px; display: grid; gap: 10px;
     }
     .roxy-workspace-box .row { align-items: flex-end; }
+    .remail-wallet-line {
+      grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap;
+      gap: 3px; min-height: 24px; padding: 0 12px; color: var(--muted); font-size: 12px;
+    }
+    .remail-wallet-line .balance { color: var(--green); }
+    .remail-wallet-refresh {
+      width: 20px; height: 20px; min-height: 20px; margin: 0 1px; padding: 2px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 0; border-radius: 50%; background: transparent; color: var(--blue); cursor: pointer;
+    }
+    .remail-wallet-refresh:hover { background: #e0ebff; }
+    .remail-wallet-refresh:disabled { color: #98a2b3; cursor: wait; }
+    .remail-wallet-refresh svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; }
+    .remail-wallet-refresh.loading svg { animation: remail-wallet-spin .8s linear infinite; }
+    @keyframes remail-wallet-spin { to { transform: rotate(360deg); } }
     .roxy-invite-link {
       display: inline-flex; align-items: center; justify-content: center; width: fit-content;
       min-height: 30px; padding: 0 10px; border-radius: 999px; border: 1px solid #9bbcff;
@@ -2735,6 +2750,7 @@ function emailConfigSectionForKey(key) {
   }
   if (key.startsWith('GPTMAIL_')) return ['GPTMail', 'GPTMail 临时邮箱 API 配置'];
   if (key.startsWith('MAIL_NEST_')) return ['MailNest', 'MailNest / 迈巢临时邮箱 API 配置'];
+  if (key.startsWith('REMAIL_')) return ['Remail', 'Remail 长效 / 短效邮箱、后缀和账户 API 配置'];
   if (key.startsWith('CLOUDMAIL_')) return ['CloudMail', 'CloudMail 域名随机邮箱、Token 和收信 API 配置'];
   if (key.startsWith('OUTLOOK_')) return ['Outlook 邮箱池', 'Outlook 邮箱池和取件模式配置'];
   if (['EMAIL_DOMAIN','QQ_EMAIL','QQ_IMAP_PASSWORD'].includes(key)) return ['Cloudflare 域名邮箱', 'Cloudflare 转发到 QQ 邮箱后的 IMAP 收信配置'];
@@ -2776,6 +2792,7 @@ function renderSectionedConfigFields(fields, activeSectionName, setActiveSection
   const current = bySection[activeSectionName];
   if (!current) return html;
   html += configSubhead(activeSectionName, current.help);
+  if (activeSectionName === 'Remail') html += renderRemailWalletTools();
   for (const f of current.fields) {
     html += renderConfigField(f);
     if (f.key === 'CLOUDMAIL_AUTH_TOKEN') html += renderCloudMailTokenTools();
@@ -2806,7 +2823,7 @@ function renderConfigFields(fields) {
       CONFIG_EMAIL_ACTIVE_SECTION,
       v => { CONFIG_EMAIL_ACTIVE_SECTION = v; },
       emailConfigSectionForKey,
-      ['通用邮箱 / OTP', 'GPTMail', 'MailNest', 'CloudMail', 'Outlook 邮箱池', 'Cloudflare 域名邮箱', '其他邮箱配置'],
+      ['通用邮箱 / OTP', 'GPTMail', 'MailNest', 'Remail', 'CloudMail', 'Outlook 邮箱池', 'Cloudflare 域名邮箱', '其他邮箱配置'],
       'email-config-section'
     );
   }
@@ -2894,6 +2911,19 @@ function renderCloudMailTokenTools() {
   `;
 }
 
+function renderRemailWalletTools() {
+  if (CONFIG_ACTIVE_GROUP !== '邮箱 / OTP') return '';
+  return `
+    <div id="remailWalletStatus" class="remail-wallet-line">
+      <span class="balance">消费余额 <span id="remailWalletBalance">正在加载...</span></span>
+      <button type="button" id="btnLoadRemailWallet" class="remail-wallet-refresh" title="刷新余额" aria-label="刷新 Remail 余额">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+      </button>
+      <span>· 历史消费 <span id="remailWalletSpend">-</span> · 订单数 <span id="remailWalletOrders">-</span> · 更新时间 <span id="remailWalletUpdatedAt">-</span></span>
+    </div>
+  `;
+}
+
 function renderChatgpt2ApiTools() {
   if (CONFIG_ACTIVE_GROUP !== 'chatgpt2api') return '';
   return `
@@ -2971,6 +3001,54 @@ async function loadCloudMailDomains() {
   }
 }
 
+async function loadRemailWallet() {
+  const btn = $('#btnLoadRemailWallet');
+  const status = $('#remailWalletStatus');
+  const balance = $('#remailWalletBalance');
+  const spend = $('#remailWalletSpend');
+  const orders = $('#remailWalletOrders');
+  const updatedAt = $('#remailWalletUpdatedAt');
+  if (!btn || !status || !balance || !spend || !orders || !updatedAt) return;
+  const apiKey = String(_configValue('REMAIL_API_KEY') || '').trim();
+  if (!apiKey) {
+    balance.textContent = '请先填写 API Key';
+    spend.textContent = '-';
+    orders.textContent = '-';
+    updatedAt.textContent = '-';
+    status.title = '';
+    return;
+  }
+  btn.disabled = true;
+  btn.classList.add('loading');
+  balance.textContent = '查询中...';
+  spend.textContent = '-';
+  orders.textContent = '-';
+  updatedAt.textContent = '-';
+  status.title = '';
+  try {
+    const r = await api('/api/remail/wallet', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({api_key: apiKey}),
+    });
+    const wallet = r.wallet || {};
+    const shown = value => value === undefined || value === null || value === '' ? '-' : String(value);
+    balance.textContent = shown(wallet.consumerBalance);
+    spend.textContent = shown(wallet.historicalSpend);
+    orders.textContent = shown(wallet.orderCount);
+    updatedAt.textContent = shown(wallet.updatedAt);
+  } catch(e) {
+    balance.textContent = '查询失败';
+    spend.textContent = '-';
+    orders.textContent = '-';
+    updatedAt.textContent = '-';
+    status.title = e.message || '';
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('loading');
+  }
+}
+
 async function testChatgpt2ApiConnection() {
   const btn = $('#btnTestChatgpt2Api');
   const status = $('#chatgpt2ApiStatus');
@@ -3003,6 +3081,8 @@ function bindRoxyWorkspaceTools() {
   if (cloudBtn) cloudBtn.addEventListener('click', genCloudMailToken);
   const cloudDomainBtn = $('#btnLoadCloudMailDomains');
   if (cloudDomainBtn) cloudDomainBtn.addEventListener('click', loadCloudMailDomains);
+  const remailWalletBtn = $('#btnLoadRemailWallet');
+  if (remailWalletBtn) remailWalletBtn.addEventListener('click', loadRemailWallet);
 
   const loadBtn = $('#btnLoadRoxyWorkspaces');
   const saveBtn = $('#btnSaveRoxyWorkspace');
@@ -3030,6 +3110,9 @@ function renderConfigPanel() {
   `;
   bindRoxyWorkspaceTools();
   syncAccountPasswordControls();
+  if (CONFIG_ACTIVE_GROUP === '邮箱 / OTP' && CONFIG_EMAIL_ACTIVE_SECTION === 'Remail') {
+    loadRemailWallet();
+  }
 }
 
 async function loadConfig() {

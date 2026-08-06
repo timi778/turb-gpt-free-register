@@ -168,6 +168,62 @@ class PlatformOAuthTests(unittest.TestCase):
                 expected_state="expected",
             )
 
+    @patch("core.platform_oauth.time.sleep")
+    def test_network_failure_retries_three_rounds_then_succeeds(self, sleep):
+        from core.platform_oauth import _run
+
+        attempts = []
+
+        def fetcher():
+            attempts.append(len(attempts) + 1)
+            if len(attempts) <= 3:
+                raise RuntimeError(
+                    "Failed to perform, curl: (35) TLS connect error: invalid library"
+                )
+            return {"access_token": "platform-at"}
+
+        result = _run(fetcher, "user@example.com")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(attempts, [1, 2, 3, 4])
+        self.assertEqual(
+            [item.args[0] for item in sleep.call_args_list],
+            [3.0, 3.0, 3.0],
+        )
+
+    @patch("core.platform_oauth.time.sleep")
+    def test_network_failure_stops_after_three_retry_rounds(self, sleep):
+        from core.platform_oauth import _run
+
+        attempts = []
+
+        def fetcher():
+            attempts.append(len(attempts) + 1)
+            raise RuntimeError("curl: (35) TLS connect error")
+
+        result = _run(fetcher, "user@example.com")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(attempts, [1, 2, 3, 4])
+        self.assertEqual(sleep.call_count, 3)
+
+    @patch("core.platform_oauth.time.sleep")
+    def test_non_network_failure_is_not_retried(self, sleep):
+        from core.platform_oauth import _run
+
+        attempts = []
+
+        def fetcher():
+            attempts.append(len(attempts) + 1)
+            raise RuntimeError("Platform OAuth state 校验失败")
+
+        result = _run(fetcher, "user@example.com")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(attempts, [1])
+        sleep.assert_not_called()
+
     def test_playwright_path_uses_context_request_without_loading_callback_page(self):
         from core.platform_oauth import get_platform_oauth_tokens_playwright
 

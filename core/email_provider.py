@@ -10,15 +10,25 @@ EMAIL_SOURCE 支持单个或多个来源：
     "gptmail"
     "mailnest"
     "cloudmail"
-    "outlook,generic_api,mailnest,cloudmail"          # 按顺序兜底
-    ["outlook", "generic_api", "mailnest", "cloudmail"]  # 也兼容列表写法
+    "remail"
+    "outlook,generic_api,mailnest,cloudmail,remail"          # 按顺序兜底
+    ["outlook", "generic_api", "mailnest", "cloudmail", "remail"]  # 也兼容列表写法
 """
 import logging
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-_VALID_SOURCES = ("outlook", "generic_api", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail")
+_VALID_SOURCES = (
+    "outlook",
+    "generic_api",
+    "cloudflare_domain",
+    "cloudflare",
+    "gptmail",
+    "mailnest",
+    "cloudmail",
+    "remail",
+)
 
 
 def parse_email_sources(value=None) -> list[str]:
@@ -65,6 +75,9 @@ def _pick_from_source(source: str) -> str:
     if source == "cloudmail":
         from core.cloudmail_client import pick_account
         return pick_account().email
+    if source == "remail":
+        from core.remail_client import pick_account
+        return pick_account().email
     from core.outlook_client import pick_account
     return pick_account().email
 
@@ -99,13 +112,25 @@ def resolve_email_source(email: str) -> str:
     from core.cloudmail_client import get_account_context as get_cloudmail_context
     if get_cloudmail_context(email):
         return "cloudmail"
+    from core.remail_client import get_account_context as get_remail_context
+    if get_remail_context(email):
+        return "remail"
 
     from core import db
     # 注册成功账号会持久化 email_source；即使临时邮箱上下文已释放，
     # 后续登录触发的 OTP 仍应按原来源取信（尤其是 MailNest）。
     registered = db.get_account_by_email(email)
     registered_source = str((registered or {}).get("email_source") or "").strip().lower()
-    if registered_source in {"gptmail", "cloudflare", "mailnest", "cloudmail", "generic_api", "outlook", "cloudflare_domain"}:
+    if registered_source in {
+        "gptmail",
+        "cloudflare",
+        "mailnest",
+        "cloudmail",
+        "remail",
+        "generic_api",
+        "outlook",
+        "cloudflare_domain",
+    }:
         return registered_source
     if db.get_generic_api_email_by_email(email):
         return "generic_api"
@@ -181,6 +206,9 @@ def wait_for_otp(
     if source == "cloudmail":
         from core.cloudmail_client import fetch_latest_otp
         return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+    if source == "remail":
+        from core.remail_client import fetch_latest_otp
+        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
     from core.outlook_client import fetch_latest_otp
     return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
 
@@ -205,6 +233,9 @@ def release_email(email: str, status: str = "available", note: str | None = None
         release_account(email, status=status, note=note)
     elif source == "cloudmail":
         from core.cloudmail_client import release_account
+        release_account(email, status=status, note=note)
+    elif source == "remail":
+        from core.remail_client import release_account
         release_account(email, status=status, note=note)
     else:
         from core.outlook_client import release_account

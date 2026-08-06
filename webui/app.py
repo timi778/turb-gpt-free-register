@@ -74,8 +74,8 @@ def create_app(auth_code: str | None = None) -> Flask:
         from core.email_provider import parse_email_sources
         pool = {"total": 0, "available": 0, "used": 0, "failed": 0}
         for src in parse_email_sources(_email_cfg.EMAIL_SOURCE):
-            # GPTMail/MailNest/CloudMail 地址按需生成，不属于本地邮箱池。
-            if src in ("gptmail", "mailnest", "cloudmail", "cloudflare"):
+            # 临时邮箱地址按需生成，不属于本地邮箱池。
+            if src in ("gptmail", "mailnest", "cloudmail", "cloudflare", "remail"):
                 continue
             one = (
                 db.generic_api_email_pool_summary() if src == "generic_api"
@@ -1551,6 +1551,13 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "ok": False,
                     "error": "已选择 mailnest 邮箱来源，请填写 MailNest 项目代码（配置 → 邮箱 / OTP）。",
                 }), 400
+        if "remail" in sources:
+            api_key = str(getattr(_email_cfg, "REMAIL_API_KEY", "") or "").strip()
+            if not api_key:
+                return jsonify({
+                    "ok": False,
+                    "error": "已选择 remail 邮箱来源，请填写 Remail API Key（配置 → 邮箱 / OTP）。",
+                }), 400
         if "cloudmail" in sources:
             api_base = str(getattr(_email_cfg, "CLOUDMAIL_API_BASE", "") or "").strip()
             token = str(getattr(_email_cfg, "CLOUDMAIL_AUTH_TOKEN", "") or "").strip()
@@ -1564,7 +1571,7 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "ok": False,
                     "error": "已选择 cloudmail 邮箱来源，请填写 CloudMail Token（配置 → 邮箱 / OTP）。",
                 }), 400
-        if "gptmail" in sources or "mailnest" in sources or "cloudmail" in sources or "cloudflare" in sources:
+        if any(src in sources for src in ("gptmail", "mailnest", "cloudmail", "cloudflare", "remail")):
             # 临时邮箱在任务开始时动态生成，不需要本地邮箱池容量提示。
             warning = ""
         elif "cloudflare_domain" in sources:
@@ -1790,6 +1797,23 @@ def create_app(auth_code: str | None = None) -> Flask:
             str(data.get("admin_key") or "").strip(),
         )
         return jsonify(result)
+
+    @app.post("/api/remail/wallet")
+    def api_remail_wallet():
+        """使用当前表单或已保存的 API Key 只读查询 Remail 余额。"""
+        data = request.get_json(silent=True) or {}
+        api_key = str(data.get("api_key") or "").strip() or None
+        try:
+            from core.remail_client import RemailError, get_wallet
+
+            wallet = get_wallet(api_key=api_key)
+            return jsonify({"ok": True, "wallet": wallet})
+        except RemailError as exc:
+            logger.warning("查询 Remail 钱包失败: %s", exc)
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("查询 Remail 钱包失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
 
     @app.post("/api/cloudmail/gen-token")
     def api_cloudmail_gen_token():

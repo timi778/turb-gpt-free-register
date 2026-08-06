@@ -358,7 +358,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "EMAIL_SOURCE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
-        "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,cloudflare_domain,cloudflare,gptmail,mailnest,cloudmail",
+        "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,cloudflare_domain,cloudflare,gptmail,mailnest,cloudmail,remail",
     },
     {
         "key": "GPTMAIL_API_KEY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
@@ -437,6 +437,31 @@ EDITABLE_FIELDS = [
     {
         "key": "MAIL_NEST_PROJECT_CODE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
         "label": "MailNest 项目代码", "help": "项目代码 默认 chatgpt001 获取页面 mailnest.top/buy-email",
+    },
+    {
+        "key": "REMAIL_API_KEY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "Remail API Key", "help": "选择 remail 邮箱来源时必填；自动匹配 OpenAI/ChatGPT 项目并领取邮箱",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "REMAIL_SERVICE_MODE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "Remail 邮箱模式", "help": "短效接码仅接收一次邮件；长效购买可在平台有效期内重复收件",
+        "options": [
+            {"value": "code", "label": "短效接码（一次邮件）"},
+            {"value": "purchase", "label": "长效购买（可重复收件）"},
+        ],
+    },
+    {
+        "key": "REMAIL_PROJECT_ID", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "Remail 项目 ID（可选）", "help": "默认 0 自动搜索；平台项目名称不含 OpenAI/ChatGPT 时可填写",
+    },
+    {
+        "key": "REMAIL_PRODUCT_ID", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "Remail 商品 ID（可选）", "help": "默认 0 自动选择有库存的接码商品；填写后与项目 ID 配合使用",
+    },
+    {
+        "key": "REMAIL_EMAIL_SUFFIXES", "file": "email.py", "type": "list_str_multiline", "group": "邮箱 / OTP",
+        "label": "Remail emailSuffix 白名单", "help": "可选，每行一个邮箱后缀，例如 outlook.com、hotmail.com；每次下单只从商品有库存的已配置后缀中随机选择一个",
     },
     {
         "key": "CLOUDMAIL_API_BASE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
