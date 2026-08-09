@@ -158,6 +158,7 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
             proxy_used=((opened.raw or {}).get("proxy") if opened else None) or proxy or None,
             batch_dir=batch_dir,
             extra={
+                "registration_driver": "cloak",
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),
                 "expires": session_info.get("expires"),

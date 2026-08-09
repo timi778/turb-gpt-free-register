@@ -57,6 +57,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_oauth_refreshes = db.recover_interrupted_platform_oauth_refreshes()
     if recovered_oauth_refreshes:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的 OAuth 刷新状态", recovered_oauth_refreshes)
+    recovered_remail_relogins = db.recover_interrupted_remail_relogins()
+    if recovered_remail_relogins:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的 Remail 长效补登状态", recovered_remail_relogins)
 
     # ----------------------------------------------------------
     # 页面
@@ -363,6 +366,152 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped_count": len(skipped),
             **batch,
         }), 202
+
+
+    @app.post("/api/accounts/remail-relogin-bulk")
+    def api_accounts_remail_relogin_bulk():
+        """批量使用已持久化的 Remail 长效邮箱 OTP 补登并更新 AT/RT。"""
+        from core import remail_relogin_service
+
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        workers = data.get("workers", 1)
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多选择 500 个账号"}), 400
+        try:
+            workers = max(1, min(16, int(workers)))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "workers 必须是数字"}), 400
+
+        selected = []
+        skipped = []
+        seen_ids = set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen_ids:
+                continue
+            seen_ids.add(acc_id)
+            account = db.get_account(acc_id)
+            if not account:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            email = str(account.get("email") or "").strip()
+            if not account.get("remail_long_lived"):
+                skipped.append({"id": acc_id, "email": email, "reason": "不是已持久化的 Remail 长效邮箱账号"})
+                continue
+            if not db.claim_account_remail_relogin(acc_id, trigger="manual_bulk"):
+                skipped.append({"id": acc_id, "email": email, "reason": "补登任务正在执行"})
+                continue
+            selected.append({"id": acc_id, "email": email})
+
+        if not selected:
+            return jsonify({
+                "ok": False,
+                "error": "没有可补登的 Remail 长效邮箱账号",
+                "skipped": skipped,
+                "skipped_count": len(skipped),
+            }), 409
+        try:
+            batch = remail_relogin_service.start_batch(selected, workers)
+        except Exception as exc:
+            for item in selected:
+                db.complete_account_remail_relogin(int(item["id"]), {
+                    "status": "failed",
+                    "error": f"补登任务启动失败: {type(exc).__name__}: {exc}",
+                    "message": "补登任务启动失败",
+                    "driver": "",
+                })
+            return jsonify({
+                "ok": False,
+                "error": f"补登任务启动失败: {type(exc).__name__}: {exc}",
+                "skipped": skipped,
+            }), 500
+        return jsonify({
+            "ok": True,
+            "message": f"已开始补登 {len(selected)} 个 Remail 长效邮箱账号，并发 {workers}",
+            "started": selected,
+            "started_count": len(selected),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+            **batch,
+        }), 202
+
+
+    @app.post("/api/accounts/<int:acc_id>/remail-relogin")
+    def api_account_remail_relogin(acc_id: int):
+        """单个 Remail 长效账号补登；前端行内按钮使用。"""
+        from core import remail_relogin_service
+
+        data = request.get_json(silent=True) or {}
+        try:
+            workers = max(1, min(16, int(data.get("workers", 1))))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "workers 必须是数字"}), 400
+        account = db.get_account(acc_id)
+        if not account:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        email = str(account.get("email") or "").strip()
+        if not account.get("remail_long_lived"):
+            return jsonify({"ok": False, "error": "该账号不是已持久化的 Remail 长效邮箱账号"}), 400
+        if not db.claim_account_remail_relogin(acc_id, trigger="manual"):
+            return jsonify({"ok": False, "error": "补登任务正在执行，或账号状态不可用"}), 409
+        item = {"id": acc_id, "email": email}
+        try:
+            batch = remail_relogin_service.start_batch([item], workers)
+        except Exception as exc:
+            db.complete_account_remail_relogin(acc_id, {
+                "status": "failed",
+                "error": f"补登任务启动失败: {type(exc).__name__}: {exc}",
+                "message": "补登任务启动失败",
+                "driver": "",
+            })
+            return jsonify({"ok": False, "error": f"补登任务启动失败: {type(exc).__name__}: {exc}"}), 500
+        return jsonify({
+            "ok": True,
+            "message": f"已开始补登 {email}",
+            "started": [item],
+            "started_count": 1,
+            **batch,
+        }), 202
+
+
+    @app.get("/api/accounts/remail-relogin-log")
+    def api_account_remail_relogin_log():
+        """读取某个长效 Remail 账号最近一次补登日志。?email=xxx"""
+        from core import remail_relogin_service
+
+        email = (request.args.get("email") or "").strip()
+        if not email:
+            return jsonify({"ok": False, "error": "email 为空"}), 400
+        account = db.get_account_by_email(email)
+        if account is None:
+            return jsonify({"ok": False, "error": f"账号不存在: {email}"}), 404
+        if not account.get("remail_long_lived"):
+            return jsonify({"ok": False, "error": "该账号不是 Remail 长效邮箱账号"}), 400
+
+        status = str(account.get("remail_relogin_status") or "never").strip().lower()
+        running = status in {"queued", "running"}
+        path = remail_relogin_service.log_path(email)
+        if not path.exists():
+            return jsonify({"ok": True, "log": "", "running": running, "status": status})
+        max_bytes = 50_000
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > max_bytes:
+                handle.seek(size - max_bytes)
+            content = handle.read().decode("utf-8", errors="replace")
+        return jsonify({
+            "ok": True,
+            "log": content,
+            "running": running,
+            "status": status,
+        })
 
 
     @app.post("/api/accounts/check-plan")

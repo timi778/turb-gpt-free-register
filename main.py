@@ -511,6 +511,7 @@ def run_registration(
             proxy_used=session.proxy or None,
             batch_dir=batch_dir,
             extra={
+                "registration_driver": "protocol",
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),
                 "expires": session_info.get("expires"),

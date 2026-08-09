@@ -139,10 +139,15 @@
     .accounts-table .col-token-life { width: 156px; }
     .accounts-table .col-plan { width: 340px; }
     .accounts-table .col-note { width: 180px; }
+    .accounts-table .col-remail { width: 178px; }
     .accounts-table .col-actions { width: 460px; }
-    .accounts-table td:nth-child(9), .accounts-table th:nth-child(9) { overflow: visible; text-overflow: clip; }
+    .accounts-table td:nth-child(10), .accounts-table th:nth-child(10) { overflow: visible; text-overflow: clip; }
     .token-countdown { min-width: 126px; font-variant-numeric: tabular-nums; }
     .token-refresh-status { white-space: nowrap; }
+    .remail-column { display: grid; gap: 6px; align-items: start; }
+    .remail-actions { justify-self: start; }
+    .remail-cell { display: grid; gap: 3px; min-width: 0; }
+    .remail-cell .sub-cell { white-space: normal; line-height: 1.35; }
     .outlook-table .col-actions { width: 220px; }
     .codex-table .col-actions { width: 260px; }
     th { position: sticky; top: 0; background: #fbfcfe; color: #475467; z-index: 1; font-size: 12px; }
@@ -159,6 +164,7 @@
     .status-partial_success { color: #9a6700; background: #fff7d6; }
     .status-running { color: var(--amber); background: #fff7e6; }
     .status-success { color: var(--green); background: #e9f7ef; }
+    .status-partial { color: #9a6700; background: #fff7d6; }
     .extract-link-cell {
       display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
       margin-top: 4px; max-width: 100%;
@@ -179,8 +185,10 @@
     }
     .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .jobs-table td.actions-cell { text-align: center; vertical-align: middle; overflow: visible; }
+    .accounts-table td.actions-cell { vertical-align: middle; overflow: visible; text-overflow: clip; }
     .job-actions { justify-content: center; flex-wrap: nowrap; width: 100%; }
     .job-actions button { flex: 0 0 auto; }
+    .account-actions { width: 100%; }
     .actions button { min-height: 30px; border: 1px solid var(--line); border-radius: 6px; background: #fff; padding: 0 10px; font-weight: 800; cursor: pointer; font-size: 12px; line-height: 1; display:inline-flex; align-items:center; justify-content:center; white-space:nowrap; }
     .actions button.primary { border-color: var(--blue); background: var(--blue); color: #fff; }
     .actions button.good { border-color: #2f855a; background: #edf8f1; color: #166534; }
@@ -195,8 +203,8 @@
       width: 100%; max-width: 100%; min-width: 0;
       max-height: 320px; overflow: auto; line-height: 1.5;
     }
-    #logPanel, #retryLogPanel, #qrPanel, #groupManagerPanel { min-width: 0; max-width: 100%; overflow-x: hidden; }
-    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #qrPanel:not(.hidden), #groupManagerPanel:not(.hidden) {
+    #logPanel, #retryLogPanel, #remailReloginLogPanel, #qrPanel, #groupManagerPanel { min-width: 0; max-width: 100%; overflow-x: hidden; }
+    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #remailReloginLogPanel:not(.hidden), #qrPanel:not(.hidden), #groupManagerPanel:not(.hidden) {
       position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
       z-index: 1000; display: block; width: min(1100px, calc(100vw - 48px));
       max-height: min(760px, calc(100vh - 48px)); overflow: hidden;
@@ -205,9 +213,9 @@
     }
     #qrPanel:not(.hidden) { width: min(520px, calc(100vw - 48px)); text-align: center; }
     #groupManagerPanel:not(.hidden) { width: min(760px, calc(100vw - 48px)); }
-    #logPanel h3, #retryLogPanel h3, #qrPanel h3, #groupManagerPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-    #logPanel h3 .btn, #retryLogPanel h3 .btn, #qrPanel h3 .btn, #groupManagerPanel h3 .btn { margin-left:auto; float:none !important; }
-    #logPanel .log, #retryLogPanel .log { max-height: calc(min(760px, calc(100vh - 48px)) - 74px); margin-top:0; }
+    #logPanel h3, #retryLogPanel h3, #remailReloginLogPanel h3, #qrPanel h3, #groupManagerPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+    #logPanel h3 .btn, #retryLogPanel h3 .btn, #remailReloginLogPanel h3 .btn, #qrPanel h3 .btn, #groupManagerPanel h3 .btn { margin-left:auto; float:none !important; }
+    #logPanel .log, #retryLogPanel .log, #remailReloginLogPanel .log { max-height: calc(min(760px, calc(100vh - 48px)) - 74px); margin-top:0; }
     #qrPanel img { display:block; max-width:min(360px, calc(100vw - 96px)); max-height:420px; margin:12px auto; border:1px solid var(--line); border-radius:10px; background:#fff; }
     #qrPanel .qr-link { display:block; word-break:break-all; white-space:normal; font-size:12px; color:var(--muted); margin-top:8px; }
     .group-manager-list { display: grid; gap: 8px; max-height: min(560px, calc(100vh - 190px)); overflow: auto; margin-top: 12px; }
@@ -437,6 +445,13 @@
         </div>
         <div class="buttons">
           <span class="muted" id="accountsSelectedHint" style="font-size:12px;align-self:center;margin-right:4px;">已选 0</span>
+          <span class="muted" id="remailSelectedHint" style="font-size:12px;align-self:center;margin-right:4px;">长效已选 0</span>
+          <label class="inline-num" title="批量补登 Remail 长效邮箱账号的并发线程数">补登线程
+            <input id="remailReloginWorkers" type="number" min="1" max="16" value="1">
+          </label>
+          <button class="btn primary" id="btnReloginSelectedRemail" disabled title="只补登已选择的 Remail 长效邮箱账号，并更新 ChatGPT AT/Platform RT">补登长效邮箱</button>
+          <button class="btn" id="btnSelectAllLongLivedRemail" title="选择当前筛选结果中的全部 Remail 长效邮箱账号">全选长效</button>
+          <button class="btn" id="btnClearLongLivedRemail" title="取消当前已选择的全部 Remail 长效邮箱账号">取消全选长效</button>
           <label class="inline-num" title="批量补跑 Codex 的并发线程数">补跑线程
             <input id="codexBulkWorkers" type="number" min="1" max="16" value="3">
           </label>
@@ -463,10 +478,10 @@
       </div>
       <div class="table-wrap">
         <table class="accounts-table">
-          <colgroup><col class="col-check"><col class="col-id"><col class="col-email"><col class="col-source"><col class="col-token"><col class="col-token"><col class="col-token-life"><col class="col-status"><col class="col-plan"><col class="col-note"><col class="col-small"><col class="col-status"><col class="col-time"><col class="col-actions"></colgroup>
+          <colgroup><col class="col-check"><col class="col-id"><col class="col-email"><col class="col-source"><col class="col-remail"><col class="col-token"><col class="col-token"><col class="col-token-life"><col class="col-status"><col class="col-plan"><col class="col-note"><col class="col-small"><col class="col-status"><col class="col-time"><col class="col-actions"></colgroup>
           <thead><tr>
             <th><input type="checkbox" id="accountsSelectAll" title="全选/取消全选当前页账号"></th>
-            <th>ID</th><th>邮箱</th><th>来源</th><th>Token</th><th>账号密码</th><th>Token时效</th><th>当前 RT</th><th>套餐</th><th>备注</th><th>2FA</th><th>Codex</th><th>创建时间</th><th>操作</th>
+            <th>ID</th><th>邮箱</th><th>来源</th><th>Remail</th><th>Token</th><th>账号密码</th><th>Token时效</th><th>当前 RT</th><th>套餐</th><th>备注</th><th>2FA</th><th>Codex</th><th>创建时间</th><th>操作</th>
           </tr></thead>
           <tbody id="accountsBody"></tbody>
         </table>
@@ -477,6 +492,12 @@
           <button class="btn" id="btnCloseRetryLog" style="float:right;min-height:28px;">关闭</button>
         </h3>
         <div class="log" id="retryLogContent">加载中…</div>
+      </div>
+      <div class="body hidden" id="remailReloginLogPanel">
+        <h3>补登日志：<span id="remailReloginLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
+          <button class="btn" id="btnCloseRemailReloginLog" style="float:right;min-height:28px;">关闭</button>
+        </h3>
+        <div class="log" id="remailReloginLogContent">加载中…</div>
       </div>
     </section>
   </div>
@@ -895,7 +916,7 @@ async function refreshJobs() {
 
 let modalScrollY = 0;
 function updateModalScrollLock() {
-  const opened = !$('#logPanel').classList.contains('hidden') || !$('#retryLogPanel').classList.contains('hidden') || !$('#qrPanel').classList.contains('hidden') || !$('#groupManagerPanel').classList.contains('hidden');
+  const opened = !$('#logPanel').classList.contains('hidden') || !$('#retryLogPanel').classList.contains('hidden') || !$('#remailReloginLogPanel').classList.contains('hidden') || !$('#qrPanel').classList.contains('hidden') || !$('#groupManagerPanel').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -919,6 +940,13 @@ function closeRetryLogModal() {
   retryLogEmail = null;
   clearInterval(retryLogTimer);
   $('#retryLogPanel').classList.add('hidden');
+  updateModalScrollLock();
+}
+function closeRemailReloginLogModal() {
+  remailReloginLogEmail = null;
+  clearInterval(remailReloginLogTimer);
+  remailReloginLogTimer = null;
+  $('#remailReloginLogPanel').classList.add('hidden');
   updateModalScrollLock();
 }
 function openQrModal(url) {
@@ -1195,6 +1223,12 @@ async function loadAccounts() {
     renderAccountGroupTabs();
     renderAccounts();
     renderGroupManagerList();
+    if (remailReloginLogEmail && remailReloginLogTimer === null) {
+      const logAccount = ACCOUNTS.find(account => String(account.email || '') === remailReloginLogEmail);
+      if (logAccount && ['queued', 'running'].includes(String(logAccount.remail_relogin_status || '').toLowerCase())) {
+        startRemailReloginLogPolling();
+      }
+    }
   } catch(e) {}
   finally { accountsLoading = false; }
 }
@@ -1533,6 +1567,49 @@ function _extractLinkAction(r) {
   if (!eligible) return '';
   return `<button class="good" data-extract-link="${esc(r.id)}" title="为该 free(可Plus试用) 账号创建 PIX/UPI 提链任务">提链</button>`;
 }
+function _remailCell(r) {
+  const mode = String(r.remail_service_mode || '').toLowerCase();
+  const hasToken = !!r.remail_service_token_present;
+  if (!r.remail_long_lived && mode !== 'code' && !hasToken) return '<span class="muted">-</span>';
+  if (!r.remail_long_lived) {
+    return '<span class="pill status-used" title="短效 Remail 接码不会持久化，保持原有逻辑">短效</span>';
+  }
+  const status = String(r.remail_relogin_status || 'never').toLowerCase();
+  const meta = {
+    never: ['可补登', 'status-used'],
+    queued: ['排队中', 'status-running'],
+    running: ['补登中', 'status-running'],
+    success: ['最近成功', 'status-success'],
+    partial: ['AT已更新', 'status-partial'],
+    failed: ['补登失败', 'status-failed'],
+    stopped: ['已停止', 'status-used'],
+  }[status] || ['可补登', 'status-used'];
+  const until = _fmtPlanTime(r.remail_receive_until || r.remail_after_sale_until || '', false);
+  const message = r.remail_relogin_error || r.remail_relogin_message || '';
+  const detail = [
+    r.remail_order_no ? `订单: ${r.remail_order_no}` : '',
+    until ? `平台标注时间: ${until}` : '',
+    message,
+  ].filter(Boolean).join('；');
+  return `<div class="remail-cell"><span class="pill ${meta[1]}" title="${esc(detail)}">长效 · ${meta[0]}</span>${until ? `<div class="sub-cell" title="${esc(until)}">平台时间 ${esc(until)}</div>` : ''}<div class="sub-cell">以 Remail 当前可取件状态为准</div></div>`;
+}
+function _remailAction(r) {
+  if (!r.remail_long_lived) return '';
+  const status = String(r.remail_relogin_status || '').toLowerCase();
+  if (status === 'queued' || status === 'running') {
+    return `<button disabled title="Remail 长效补登正在执行">补登中…</button>`;
+  }
+  const label = status === 'success' || status === 'partial' ? '再次补登' : '补登';
+  return `<button class="good" data-remail-relogin="${esc(r.id)}" title="按注册时的驱动重新登录并收取 Remail OTP，更新 ChatGPT AT/Platform RT">${label}</button>`;
+}
+function _remailLogAction(r) {
+  if (!r.remail_long_lived) return '';
+  return `<button data-remail-relogin-log="${esc(r.email)}" title="查看该长效邮箱账号最近一次补登日志">补登日志</button>`;
+}
+function _remailActions(r) {
+  if (!r.remail_long_lived) return '';
+  return `<div class="actions remail-actions">${_remailAction(r)}${_remailLogAction(r)}</div>`;
+}
 function _codexAction(r) {
   const s = r.codex_status || '';
   if (s === 'retrying') {
@@ -1557,6 +1634,7 @@ function renderAccounts() {
       <td class="muted">#${esc(r.id)}</td>
       <td><div class="main-cell">${esc(r.email)}</div><div class="sub-cell">${esc(r.user_name || '-')}</div></td>
       <td>${esc(r.email_source || '-')}</td>
+      <td><div class="remail-column">${_remailCell(r)}${_remailActions(r)}</div></td>
       <td><span class="mono" title="${esc(r.access_token || '')}">${esc(short(r.access_token || '', 10))}</span></td>
       <td><span class="mono" title="${r.registration_password ? '密码已保存' : '未设置或设置失败'}">${r.registration_password ? '******' : '<span class="muted">-</span>'}</span></td>
       <td>${_tokenLifetimeCell(r)}</td>
@@ -1566,8 +1644,8 @@ function renderAccounts() {
       <td>${r.totp_secret ? '已启用' : '<span class="muted">未启用</span>'}</td>
       <td>${_codexCell(r)}</td>
       <td class="muted">${esc(r.created_at || '-')}</td>
-      <td class="actions">${cbtn('复制Token', r.access_token, 'primary')} ${cbtn('复制密码', r.registration_password)} ${cbtn('复制整行', r.copy_line, 'good')} <button data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button> ${_planAction(r)} ${_extractLinkAction(r)} ${_codexAction(r)} <button data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button> <button class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button></td>
-    </tr>`).join('') || '<tr><td colspan="14" class="muted">暂无账号</td></tr>';
+      <td class="actions-cell"><div class="actions account-actions">${cbtn('复制Token', r.access_token, 'primary')} ${cbtn('复制密码', r.registration_password)} ${cbtn('复制整行', r.copy_line, 'good')} <button data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button> ${_planAction(r)} ${_extractLinkAction(r)} ${_codexAction(r)} <button data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button> <button class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button></div></td>
+    </tr>`).join('') || '<tr><td colspan="15" class="muted">暂无账号</td></tr>';
   updateAccountSelectionUi(rows);
   updateTokenCountdowns();
   _renderPager('accounts', total);
@@ -1575,7 +1653,11 @@ function renderAccounts() {
 
 function updateAccountSelectionUi(pageRows = null) {
   const hint = $('#accountsSelectedHint');
+  const remailHint = $('#remailSelectedHint');
   const bulkBtn = $('#btnDeleteSelectedAccounts');
+  const remailBulkBtn = $('#btnReloginSelectedRemail');
+  const selectLongBtn = $('#btnSelectAllLongLivedRemail');
+  const clearLongBtn = $('#btnClearLongLivedRemail');
   const retryBulkBtn = $('#btnRetrySelectedCodex');
   const stopCodexBulkBtn = $('#btnStopSelectedCodex');
   const downloadCpaBtn = $('#btnDownloadSelectedCpa');
@@ -1588,7 +1670,20 @@ function updateAccountSelectionUi(pageRows = null) {
   const copySelectedPasswordsBtn = $('#btnCopySelectedPasswords');
   const downloadSelectedPasswordsTxtBtn = $('#btnDownloadSelectedPasswordsTxt');
   const noteSelectedBtn = $('#btnNoteSelectedAccounts');
+  const selectedLongLived = ACCOUNTS.filter(account =>
+    ACCOUNT_SELECTED.has(Number(account.id)) && !!account.remail_long_lived
+  );
+  const filteredLongLived = accountFilteredRows().filter(account => !!account.remail_long_lived);
+  const selectedLongReady = selectedLongLived.filter(account =>
+    !['queued', 'running'].includes(String(account.remail_relogin_status || '').toLowerCase())
+  );
   if (hint) hint.textContent = `已选 ${ACCOUNT_SELECTED.size}`;
+  if (remailHint) remailHint.textContent = `长效已选 ${selectedLongLived.length}`;
+  if (remailBulkBtn) remailBulkBtn.disabled = selectedLongReady.length === 0;
+  if (selectLongBtn) selectLongBtn.disabled = filteredLongLived.length === 0;
+  if (clearLongBtn) clearLongBtn.disabled = !ACCOUNTS.some(account =>
+    !!account.remail_long_lived && ACCOUNT_SELECTED.has(Number(account.id))
+  );
   if (bulkBtn) bulkBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (retryBulkBtn) retryBulkBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (stopCodexBulkBtn) stopCodexBulkBtn.disabled = ACCOUNT_SELECTED.size === 0;
@@ -1652,8 +1747,185 @@ async function pollRetryLog() {
 }
 $('#btnCloseRetryLog').addEventListener('click', closeRetryLogModal);
 
+// ---------- Remail 长效邮箱补登日志面板 ----------
+let remailReloginLogEmail = null, remailReloginLogTimer = null;
+
+function startRemailReloginLogPolling() {
+  clearInterval(remailReloginLogTimer);
+  remailReloginLogTimer = null;
+  if (!remailReloginLogEmail) return;
+  pollRemailReloginLog();
+  remailReloginLogTimer = setInterval(pollRemailReloginLog, 2000);
+}
+
+function openRemailReloginLog(email) {
+  remailReloginLogEmail = email;
+  $('#remailReloginLogEmail').textContent = email;
+  $('#remailReloginLogContent').textContent = '加载中…';
+  $('#remailReloginLogPanel').classList.remove('hidden');
+  updateModalScrollLock();
+  startRemailReloginLogPolling();
+}
+
+async function pollRemailReloginLog() {
+  if (!remailReloginLogEmail) return;
+  const requestedEmail = remailReloginLogEmail;
+  const content = $('#remailReloginLogContent');
+  try {
+    const r = await api(`/api/accounts/remail-relogin-log?email=${encodeURIComponent(requestedEmail)}`);
+    if (requestedEmail !== remailReloginLogEmail) return;
+    const atBottom = content.scrollTop + content.clientHeight >= content.scrollHeight - 30;
+    content.textContent = r.log || '(暂无补登日志，开始补登后会在这里显示进度…)';
+    if (atBottom) content.scrollTop = content.scrollHeight;
+    if (!r.running) {
+      clearInterval(remailReloginLogTimer);
+      remailReloginLogTimer = null;
+      loadAccounts();
+    }
+  } catch (err) {
+    if (requestedEmail === remailReloginLogEmail) {
+      content.textContent = `加载补登日志失败：${err.message}`;
+    }
+  }
+}
+
+function resumeRemailReloginLogIfStarted(started) {
+  if (!remailReloginLogEmail) return;
+  const matched = (started || []).some(item => String(item.email || '') === remailReloginLogEmail);
+  if (matched) startRemailReloginLogPolling();
+}
+
+$('#btnCloseRemailReloginLog').addEventListener('click', closeRemailReloginLogModal);
+
+// ---------- Remail 长效邮箱补登 ----------
+let remailReloginPollTimer = null;
+function scheduleRemailReloginPoll(ids) {
+  const targetIds = new Set((ids || []).map(Number).filter(Number.isFinite));
+  if (!targetIds.size) return;
+  clearInterval(remailReloginPollTimer);
+  let ticks = 0;
+  const poll = async () => {
+    ticks += 1;
+    await loadAccounts();
+    const active = Array.from(targetIds).some(id => {
+      const row = ACCOUNTS.find(account => Number(account.id) === id);
+      return row && ['queued', 'running'].includes(String(row.remail_relogin_status || '').toLowerCase());
+    });
+    if (!active || ticks >= 450) {
+      clearInterval(remailReloginPollTimer);
+      remailReloginPollTimer = null;
+      updateAccountSelectionUi();
+    }
+  };
+  poll();
+  remailReloginPollTimer = setInterval(poll, 4000);
+}
+
+function selectAllLongLivedRemail() {
+  const rows = accountFilteredRows().filter(account => !!account.remail_long_lived);
+  rows.forEach(account => ACCOUNT_SELECTED.add(Number(account.id)));
+  renderAccounts();
+  showToast(rows.length ? `已选择 ${rows.length} 个长效邮箱账号` : '当前筛选没有长效邮箱账号');
+}
+
+function clearAllLongLivedRemail() {
+  const ids = new Set(ACCOUNTS.filter(account => !!account.remail_long_lived).map(account => Number(account.id)));
+  ids.forEach(id => ACCOUNT_SELECTED.delete(id));
+  renderAccounts();
+  showToast('已取消选择长效邮箱账号');
+}
+
+async function reloginOneRemail(id, btn) {
+  const account = ACCOUNTS.find(item => Number(item.id) === Number(id));
+  if (!account || !account.remail_long_lived) {
+    showToast('该账号不是可补登的 Remail 长效邮箱账号');
+    return;
+  }
+  const busy = ['queued', 'running'].includes(String(account.remail_relogin_status || '').toLowerCase());
+  if (busy) { showToast('该账号的补登任务正在执行'); return; }
+  if (!confirm(
+    `确定补登这个 Remail 长效邮箱账号吗？\n\n${account.email || ('#' + id)}\n\n` +
+    '只要 Remail 的长效 serviceToken 仍可取件，就会重新收 OTP、更新 ChatGPT AT/Platform RT；不会按固定 24 小时限制。'
+  )) return;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '补登中…';
+  try {
+    const workers = Math.max(1, Math.min(16, Number($('#remailReloginWorkers')?.value || 1)));
+    const result = await api(`/api/accounts/${id}/remail-relogin`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({workers}),
+    });
+    showToast(result.message || '长效邮箱补登已入队');
+    const startedItems = result.started || [];
+    const started = startedItems.map(item => item.id);
+    scheduleRemailReloginPoll(started.length ? started : [id]);
+    resumeRemailReloginLogIfStarted(startedItems.length ? startedItems : [{id, email: account.email}]);
+    await loadAccounts();
+  } catch (err) {
+    showToast('补登失败: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+async function reloginSelectedRemail() {
+  const ids = Array.from(ACCOUNT_SELECTED);
+  const selected = ids
+    .map(id => ACCOUNTS.find(account => Number(account.id) === Number(id)))
+    .filter(Boolean);
+  const eligible = selected.filter(account => !!account.remail_long_lived);
+  if (!eligible.length) { showToast('请先选择 Remail 长效邮箱账号'); return; }
+  const busy = eligible.filter(account => ['queued', 'running'].includes(String(account.remail_relogin_status || '').toLowerCase()));
+  const ready = eligible.filter(account => !['queued', 'running'].includes(String(account.remail_relogin_status || '').toLowerCase()));
+  if (!ready.length) { showToast('选中的长效邮箱补登任务都在执行中'); return; }
+  const workersEl = $('#remailReloginWorkers');
+  const workers = Math.max(1, Math.min(16, Number(workersEl?.value || 1)));
+  if (workersEl) workersEl.value = workers;
+  let message = `确定批量补登 ${ready.length} 个 Remail 长效邮箱账号吗？\n\n` +
+    `并发线程数：${workers}\n\n` +
+    '会按每个账号保存的注册驱动重新登录并收取验证码，Remail 能继续取件就可以随时补登，不按 24 小时限制。';
+  if (busy.length) message += `\n\n另有 ${busy.length} 个账号正在补登，会自动跳过。`;
+  if (!confirm(message)) return;
+  const btn = $('#btnReloginSelectedRemail');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '补登中…';
+  try {
+    const result = await api('/api/accounts/remail-relogin-bulk', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({account_ids: ready.map(account => account.id), workers}),
+    });
+    const skipped = (result.skipped || []).length;
+    showToast(skipped ? `已开始 ${result.started_count || 0} 个，跳过 ${skipped} 个` : (result.message || '长效邮箱补登已入队'));
+    const startedItems = result.started || [];
+    const started = startedItems.map(item => item.id);
+    scheduleRemailReloginPoll(started);
+    resumeRemailReloginLogIfStarted(startedItems);
+    await loadAccounts();
+  } catch (err) {
+    showToast('批量补登失败: ' + err.message);
+    updateAccountSelectionUi();
+  } finally {
+    btn.textContent = old;
+    updateAccountSelectionUi();
+  }
+}
+
 // 账号操作按钮（事件委托）
 $('#accountsBody').addEventListener('click', async (e) => {
+  const remailLogBtn = e.target.closest('[data-remail-relogin-log]');
+  if (remailLogBtn) {
+    openRemailReloginLog(remailLogBtn.dataset.remailReloginLog);
+    return;
+  }
+  const remailBtn = e.target.closest('[data-remail-relogin]');
+  if (remailBtn) {
+    await reloginOneRemail(Number(remailBtn.dataset.remailRelogin), remailBtn);
+    return;
+  }
   const planBtn = e.target.closest('[data-plan-check]');
   if (planBtn) {
     await checkOnePlan(Number(planBtn.dataset.planCheck), planBtn);
@@ -1778,6 +2050,9 @@ $('#btnRetrySelectedCodex').addEventListener('click', retrySelectedCodex);
 $('#btnDownloadSelectedCpa').addEventListener('click', downloadSelectedCpa);
 $('#btnStopSelectedCodex').addEventListener('click', stopSelectedCodex);
 $('#btnCheckSelectedPlans').addEventListener('click', checkSelectedPlans);
+$('#btnReloginSelectedRemail').addEventListener('click', reloginSelectedRemail);
+$('#btnSelectAllLongLivedRemail').addEventListener('click', selectAllLongLivedRemail);
+$('#btnClearLongLivedRemail').addEventListener('click', clearAllLongLivedRemail);
 
 
 function copySelectedAccountLines() {

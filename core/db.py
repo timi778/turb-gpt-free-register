@@ -151,12 +151,16 @@ def _viewer_snapshot(outlook_rows: list[dict], account_rows: list[dict]) -> dict
         (a.get("email") or "").lower(): a
         for a in account_rows
     }
+    safe_accounts = []
+    for row in sorted(account_rows, key=lambda x: int(x.get("id") or 0), reverse=True):
+        item = _decorate_account(row, group_by_id)
+        # extra_json 可能包含 Platform OAuth 凭证和 Remail serviceToken。
+        # 静态查看器只需要装饰后的展示字段，不能把后端凭证嵌入 HTML。
+        item.pop("extra_json", None)
+        safe_accounts.append(item)
     return {
         "generated_at": _now(),
-        "accounts": [
-            _decorate_account(r, group_by_id)
-            for r in sorted(account_rows, key=lambda x: int(x.get("id") or 0), reverse=True)
-        ],
+        "accounts": safe_accounts,
         "outlook": [
             _decorate_outlook(r, account_by_email)
             for r in sorted(outlook_rows, key=lambda x: int(x.get("id") or 0), reverse=True)
@@ -552,6 +556,27 @@ def _account_platform_oauth(row: dict) -> tuple[dict, dict]:
     return extra, oauth
 
 
+def _account_remail(row: dict) -> tuple[dict, dict]:
+    """读取账号 extra_json 中的 Remail 长效上下文与安全状态。"""
+    extra, _oauth = _account_platform_oauth(row)
+    raw = extra.get("remail")
+    remail = dict(raw) if isinstance(raw, dict) else {}
+    return extra, remail
+
+
+def _merge_extra_dict(current: dict | None, updates: dict | None) -> dict:
+    """合并账号扩展字段，保留旧的邮箱凭证/驱动信息。"""
+    merged = dict(current) if isinstance(current, dict) else {}
+    for key, value in (updates or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            nested = dict(merged.get(key) or {})
+            nested.update(value)
+            merged[key] = nested
+        else:
+            merged[key] = value
+    return merged
+
+
 def _store_account_platform_oauth(row: dict, extra: dict, oauth: dict) -> None:
     updated_extra = dict(extra)
     updated_extra["platform_oauth"] = dict(oauth)
@@ -561,6 +586,7 @@ def _store_account_platform_oauth(row: dict, extra: dict, oauth: dict) -> None:
 def _decorate_account(row: dict, group_by_id: dict[int, str] | None = None) -> dict:
     out = dict(row)
     _extra, platform_oauth = _account_platform_oauth(row)
+    _remail_extra, remail = _account_remail(row)
     out["platform_oauth_has_refresh_token"] = bool(
         str(platform_oauth.get("refresh_token") or "").strip()
     )
@@ -591,6 +617,35 @@ def _decorate_account(row: dict, group_by_id: dict[int, str] | None = None) -> d
     out["platform_oauth_credential_message"] = str(
         platform_oauth.get("credential_message") or ""
     )
+    # Remail 长效邮箱状态只暴露非敏感元数据；serviceToken 永不返回到账号 API。
+    remail_token = str(remail.get("service_token") or remail.get("serviceToken") or "").strip()
+    # 旧版/手工迁移记录可能只有 serviceToken；由于短效订单从不落盘，
+    # 有 token 但没有 mode 时按长效购买兼容恢复。
+    remail_mode = str(
+        remail.get("service_mode")
+        or remail.get("serviceMode")
+        or ("purchase" if remail_token else "")
+    ).strip().lower()
+    out["remail_long_lived"] = remail_mode == "purchase" and bool(remail_token)
+    out["remail_service_mode"] = remail_mode
+    out["remail_service_token_present"] = bool(remail_token)
+    out["remail_order_no"] = str(remail.get("order_no") or remail.get("orderNo") or "")
+    out["remail_receive_until"] = str(remail.get("receive_until") or remail.get("receiveUntil") or "")
+    out["remail_after_sale_until"] = str(remail.get("after_sale_until") or remail.get("afterSaleUntil") or "")
+    out["remail_status"] = str(remail.get("status") or "")
+    out["remail_relogin_status"] = str(row.get("remail_relogin_status") or remail.get("relogin_status") or "never")
+    out["remail_relogin_ok"] = row.get("remail_relogin_ok")
+    out["remail_relogin_trigger"] = str(row.get("remail_relogin_trigger") or remail.get("relogin_trigger") or "")
+    out["remail_relogin_queued_at"] = str(row.get("remail_relogin_queued_at") or remail.get("relogin_queued_at") or "")
+    out["remail_relogin_started_at"] = str(row.get("remail_relogin_started_at") or remail.get("relogin_started_at") or "")
+    out["remail_relogin_completed_at"] = str(row.get("remail_relogin_completed_at") or remail.get("relogin_completed_at") or "")
+    out["remail_relogin_message"] = str(row.get("remail_relogin_message") or remail.get("relogin_message") or "")
+    out["remail_relogin_error"] = str(row.get("remail_relogin_error") or remail.get("relogin_error") or "")
+    out["remail_relogin_driver"] = str(row.get("remail_relogin_driver") or remail.get("relogin_driver") or "")
+    out["remail_relogin_upload_status"] = str(row.get("remail_relogin_upload_status") or remail.get("relogin_upload_status") or "")
+    out["remail_relogin_upload_message"] = str(row.get("remail_relogin_upload_message") or remail.get("relogin_upload_message") or "")
+    out["remail_relogin_credential_status"] = str(row.get("remail_relogin_credential_status") or remail.get("relogin_credential_status") or "")
+    out["remail_relogin_credential_message"] = str(row.get("remail_relogin_credential_message") or remail.get("relogin_credential_message") or "")
     if not out.get("registration_password") and out.get("extra_json"):
         try:
             extra = json.loads(out["extra_json"])
@@ -851,7 +906,20 @@ def insert_account(
         outlook_rows = _load_outlook()
         existing = _find_by_email(accounts, email)
         outlook_row = _find_by_email(outlook_rows, email)
-        extra_json = json.dumps(extra, ensure_ascii=False) if extra else None
+        existing_extra: dict = {}
+        if existing is not None:
+            raw_existing_extra = existing.get("extra_json")
+            if isinstance(raw_existing_extra, dict):
+                existing_extra = dict(raw_existing_extra)
+            elif raw_existing_extra:
+                try:
+                    parsed_existing_extra = json.loads(raw_existing_extra)
+                    if isinstance(parsed_existing_extra, dict):
+                        existing_extra = parsed_existing_extra
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    existing_extra = {}
+        merged_extra = _merge_extra_dict(existing_extra, extra) if extra is not None else existing_extra
+        extra_json = json.dumps(merged_extra, ensure_ascii=False) if merged_extra else None
 
         if existing is None:
             row_id = _next_id(accounts)
@@ -925,6 +993,215 @@ def update_account_codex_status(email: str, codex_status: str, codex_error: str 
         row["updated_at"] = _now()
         _save_accounts(accounts)
         return True
+
+
+# ============================================================
+# Remail 长效邮箱补登
+# ============================================================
+
+
+def _get_account_extra_dict(row: dict) -> dict:
+    raw = row.get("extra_json")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _is_account_remail_long_lived(row: dict) -> bool:
+    _extra, remail = _account_remail(row)
+    token = str(remail.get("service_token") or remail.get("serviceToken") or "").strip()
+    mode = str(
+        remail.get("service_mode")
+        or remail.get("serviceMode")
+        or ("purchase" if token else "")
+    ).strip().lower()
+    return mode == "purchase" and bool(token)
+
+
+def claim_account_remail_relogin(acc_id: int, trigger: str = "manual") -> bool:
+    """原子占用一个长效 Remail 账号，避免重复补登。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((item for item in rows if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None or not _is_account_remail_long_lived(row):
+            return False
+        current = str(row.get("remail_relogin_status") or "").strip().lower()
+        if current in {"queued", "running"}:
+            # WebUI 重启后由 recover_interrupted_remail_relogins 负责清理；
+            # 同一进程内不允许并发占用同一邮箱验证码流。
+            return False
+        now = _now()
+        row["remail_relogin_status"] = "queued"
+        row["remail_relogin_ok"] = None
+        row["remail_relogin_trigger"] = str(trigger or "manual")
+        row["remail_relogin_queued_at"] = now
+        row["remail_relogin_started_at"] = None
+        row["remail_relogin_completed_at"] = None
+        row["remail_relogin_message"] = "已加入长效邮箱补登队列"
+        row["remail_relogin_error"] = None
+        row["remail_relogin_upload_status"] = None
+        row["remail_relogin_upload_message"] = None
+        row["remail_relogin_credential_status"] = None
+        row["remail_relogin_credential_message"] = None
+        row["updated_at"] = now
+        extra = _get_account_extra_dict(row)
+        remail = dict(extra.get("remail") or {})
+        remail.update({
+            "relogin_status": "queued",
+            "relogin_ok": None,
+            "relogin_trigger": str(trigger or "manual"),
+            "relogin_queued_at": now,
+            "relogin_started_at": None,
+            "relogin_completed_at": None,
+            "relogin_message": "已加入长效邮箱补登队列",
+            "relogin_error": None,
+        })
+        extra["remail"] = remail
+        row["extra_json"] = json.dumps(extra, ensure_ascii=False)
+        _save_accounts(rows)
+        return True
+
+
+def mark_account_remail_relogin_running(acc_id: int) -> bool:
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((item for item in rows if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None or str(row.get("remail_relogin_status") or "").lower() != "queued":
+            return False
+        now = _now()
+        row["remail_relogin_status"] = "running"
+        row["remail_relogin_started_at"] = now
+        row["remail_relogin_message"] = "正在使用原注册驱动接收邮箱验证码并补登"
+        row["remail_relogin_error"] = None
+        row["updated_at"] = now
+        extra = _get_account_extra_dict(row)
+        remail = dict(extra.get("remail") or {})
+        remail.update({
+            "relogin_status": "running",
+            "relogin_started_at": now,
+            "relogin_message": row["remail_relogin_message"],
+            "relogin_error": None,
+        })
+        extra["remail"] = remail
+        row["extra_json"] = json.dumps(extra, ensure_ascii=False)
+        _save_accounts(rows)
+        return True
+
+
+def complete_account_remail_relogin(acc_id: int, result: dict | None = None) -> bool:
+    """保存补登后的 ChatGPT AT、Platform OAuth RT、Codex/上传状态。"""
+    result = result if isinstance(result, dict) else {}
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((item for item in rows if int(item.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        now = _now()
+        access_token = str(result.get("access_token") or "").strip()
+        previous_access_token = str(row.get("access_token") or "").strip()
+        if access_token:
+            row["access_token"] = access_token
+            if access_token != previous_access_token or not row.get("access_token_updated_at"):
+                row["access_token_updated_at"] = now
+
+        session_info = result.get("session_info") if isinstance(result.get("session_info"), dict) else {}
+        user = session_info.get("user") if isinstance(session_info.get("user"), dict) else {}
+        account_info = session_info.get("account") if isinstance(session_info.get("account"), dict) else {}
+        if user.get("id") is not None:
+            row["user_id"] = user.get("id")
+        if user.get("name") is not None:
+            row["user_name"] = user.get("name")
+        if account_info.get("planType") is not None:
+            row["plan_type"] = account_info.get("planType")
+        if session_info.get("expires") is not None:
+            row["expires_at"] = session_info.get("expires")
+
+        extra = _get_account_extra_dict(row)
+        oauth = result.get("platform_oauth")
+        if isinstance(oauth, dict) and oauth:
+            old_oauth = dict(extra.get("platform_oauth") or {})
+            old_oauth.update({key: value for key, value in oauth.items() if value not in (None, "")})
+            old_oauth["refresh_status"] = "success" if oauth.get("has_refresh_token") else str(oauth.get("status") or "partial")
+            old_oauth["refresh_message"] = str(oauth.get("message") or "")[:300]
+            old_oauth["refreshed_at"] = now
+            extra["platform_oauth"] = old_oauth
+        if isinstance(result.get("driver"), str) and result.get("driver"):
+            extra["relogin_driver"] = result.get("driver")
+
+        status = str(result.get("status") or ("success" if access_token else "failed")).strip().lower()
+        if status not in {"success", "partial", "failed", "stopped"}:
+            status = "success" if access_token else "failed"
+        message = str(result.get("message") or ("长效邮箱补登成功" if access_token else "长效邮箱补登失败"))[:500]
+        error = None if status in {"success", "partial"} else str(result.get("error") or message)[:500]
+        upload = result.get("upload") if isinstance(result.get("upload"), dict) else {}
+        credential = result.get("credential") if isinstance(result.get("credential"), dict) else {}
+        row["remail_relogin_status"] = status
+        row["remail_relogin_ok"] = bool(access_token)
+        row["remail_relogin_completed_at"] = now
+        row["remail_relogin_message"] = message
+        row["remail_relogin_error"] = error
+        row["remail_relogin_driver"] = str(result.get("driver") or row.get("remail_relogin_driver") or "")
+        row["remail_relogin_upload_status"] = str(upload.get("status") or "")
+        row["remail_relogin_upload_message"] = str(upload.get("message") or upload.get("error") or "")[:300]
+        row["remail_relogin_credential_status"] = str(credential.get("status") or ("success" if oauth and oauth.get("file_path") else ""))
+        row["remail_relogin_credential_message"] = str(credential.get("message") or credential.get("error") or "")[:300]
+        row["updated_at"] = now
+
+        remail = dict(extra.get("remail") or {})
+        remail.update({
+            "relogin_status": status,
+            "relogin_ok": bool(access_token),
+            "relogin_completed_at": now,
+            "relogin_message": message,
+            "relogin_error": error,
+            "relogin_driver": row["remail_relogin_driver"],
+            "relogin_upload_status": row["remail_relogin_upload_status"],
+            "relogin_upload_message": row["remail_relogin_upload_message"],
+            "relogin_credential_status": row["remail_relogin_credential_status"],
+            "relogin_credential_message": row["remail_relogin_credential_message"],
+        })
+        extra["remail"] = remail
+        row["extra_json"] = json.dumps(extra, ensure_ascii=False)
+        _save_accounts(rows)
+        return True
+
+
+def recover_interrupted_remail_relogins() -> int:
+    """WebUI 重启时把遗留的 queued/running 状态标记为失败，可再次补登。"""
+    with _LOCK:
+        rows = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in rows:
+            if str(row.get("remail_relogin_status") or "").lower() not in {"queued", "running"}:
+                continue
+            row["remail_relogin_status"] = "failed"
+            row["remail_relogin_ok"] = False
+            row["remail_relogin_completed_at"] = now
+            row["remail_relogin_error"] = "WebUI 重启导致长效邮箱补登中断，请重新补登"
+            row["remail_relogin_message"] = "补登已中断"
+            row["updated_at"] = now
+            extra = _get_account_extra_dict(row)
+            remail = dict(extra.get("remail") or {})
+            remail.update({
+                "relogin_status": "failed",
+                "relogin_ok": False,
+                "relogin_completed_at": now,
+                "relogin_error": row["remail_relogin_error"],
+                "relogin_message": row["remail_relogin_message"],
+            })
+            extra["remail"] = remail
+            row["extra_json"] = json.dumps(extra, ensure_ascii=False)
+            recovered += 1
+        if recovered:
+            _save_accounts(rows)
+        return recovered
 
 
 def claim_account_token_refresh(acc_id: int, trigger: str = "manual") -> bool:

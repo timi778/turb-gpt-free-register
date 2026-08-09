@@ -25,6 +25,9 @@ codex_导出状态.json
 注册日志/
 accounts_viewer.html
 
+# Remail 长效订单上下文（含 serviceToken）
+remail_long_lived_accounts.json
+
 # Cloudflare 域名邮箱池（运行时数据）
 用于注册的域名邮箱.json
 

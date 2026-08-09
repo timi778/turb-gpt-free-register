@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 import random
 import re
 import threading
@@ -11,6 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import quote
 
 import requests
@@ -35,6 +38,11 @@ _SERVICE_MODES = {
     "code": ("codeEnabled", "codePrice", "短效接码"),
     "purchase": ("purchaseEnabled", "purchasePrice", "长效购买"),
 }
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 长效订单的 serviceToken 是后续收取登录验证码所必需的凭证。
+# 该文件只存本地运行数据，且由 .gitignore 排除，不通过 WebUI API 返回。
+_PERSISTED_CONTEXT_PATH = _PROJECT_ROOT / "remail_long_lived_accounts.json"
 
 
 class RemailError(RuntimeError):
@@ -66,11 +74,175 @@ class RemailAccount:
     order_no: str
     project_id: int
     product_id: int
+    service_mode: str = "code"
+    order_id: str = ""
+    status: str = ""
+    receive_started_at: str = ""
+    receive_until: str = ""
+    activated_at: str = ""
+    after_sale_until: str = ""
+    last_mail_received_at: str = ""
+    email_suffix: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    @property
+    def is_long_lived(self) -> bool:
+        return str(self.service_mode or "").strip().lower() == "purchase"
 
 
 _CONTEXT_CACHE: dict[str, RemailAccount] = {}
 _SELECTION_CACHE: dict[str, tuple[float, RemailSelection]] = {}
 _SELECTION_LOCK = threading.Lock()
+_CONTEXT_LOCK = threading.RLock()
+
+
+def _context_to_dict(account: RemailAccount, *, include_secret: bool = True) -> dict:
+    """把上下文转换为内部持久化格式；默认包含 serviceToken（仅本地使用）。"""
+    data = {
+        "email": account.email,
+        "order_no": account.order_no,
+        "project_id": int(account.project_id or 0),
+        "product_id": int(account.product_id or 0),
+        "service_mode": _service_mode(account.service_mode),
+        "order_id": account.order_id,
+        "status": account.status,
+        "receive_started_at": account.receive_started_at,
+        "receive_until": account.receive_until,
+        "activated_at": account.activated_at,
+        "after_sale_until": account.after_sale_until,
+        "last_mail_received_at": account.last_mail_received_at,
+        "email_suffix": account.email_suffix,
+        "created_at": account.created_at,
+        "updated_at": account.updated_at,
+    }
+    if include_secret:
+        data["service_token"] = account.service_token
+    return data
+
+
+def _context_from_dict(raw: dict | None) -> RemailAccount | None:
+    if not isinstance(raw, dict):
+        return None
+    email = str(raw.get("email") or "").strip()
+    token = str(raw.get("service_token") or raw.get("serviceToken") or "").strip()
+    order_no = str(raw.get("order_no") or raw.get("orderNo") or "").strip()
+    if not email or "@" not in email or not token:
+        return None
+    try:
+        project_id = int(raw.get("project_id") or raw.get("projectId") or 0)
+        product_id = int(raw.get("product_id") or raw.get("productId") or 0)
+    except (TypeError, ValueError):
+        project_id = product_id = 0
+    try:
+        mode = _service_mode(str(raw.get("service_mode") or raw.get("serviceMode") or "purchase"))
+    except RemailError:
+        mode = "purchase"
+    return RemailAccount(
+        email=email,
+        service_token=token,
+        order_no=order_no,
+        project_id=project_id,
+        product_id=product_id,
+        service_mode=mode,
+        order_id=str(raw.get("order_id") or raw.get("orderId") or ""),
+        status=str(raw.get("status") or ""),
+        receive_started_at=str(raw.get("receive_started_at") or raw.get("receiveStartedAt") or ""),
+        receive_until=str(raw.get("receive_until") or raw.get("receiveUntil") or ""),
+        activated_at=str(raw.get("activated_at") or raw.get("activatedAt") or ""),
+        after_sale_until=str(raw.get("after_sale_until") or raw.get("afterSaleUntil") or ""),
+        last_mail_received_at=str(raw.get("last_mail_received_at") or raw.get("lastMailReceivedAt") or ""),
+        email_suffix=str(raw.get("email_suffix") or raw.get("emailSuffix") or ""),
+        created_at=str(raw.get("created_at") or raw.get("createdAt") or ""),
+        updated_at=str(raw.get("updated_at") or raw.get("updatedAt") or ""),
+    )
+
+
+def _load_persisted_contexts() -> dict[str, dict]:
+    try:
+        if not _PERSISTED_CONTEXT_PATH.exists():
+            return {}
+        raw = json.loads(_PERSISTED_CONTEXT_PATH.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("[Remail] 长效邮箱上下文文件读取失败，将按空上下文继续")
+        return {}
+    if isinstance(raw, list):
+        raw = {
+            str(item.get("email") or "").strip().lower(): item
+            for item in raw
+            if isinstance(item, dict) and str(item.get("email") or "").strip()
+        }
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key).strip().lower(): value for key, value in raw.items() if isinstance(value, dict)}
+
+
+def _save_persisted_contexts(contexts: dict[str, dict]) -> None:
+    _PERSISTED_CONTEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _PERSISTED_CONTEXT_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(contexts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, _PERSISTED_CONTEXT_PATH)
+    try:
+        os.chmod(_PERSISTED_CONTEXT_PATH, 0o600)
+    except OSError:
+        pass
+
+
+def _persist_context(account: RemailAccount) -> bool:
+    if not account.is_long_lived:
+        return False
+    try:
+        with _CONTEXT_LOCK:
+            contexts = _load_persisted_contexts()
+            contexts[_cache_key(account.email)] = _context_to_dict(account)
+            _save_persisted_contexts(contexts)
+        return True
+    except Exception as exc:
+        # 已购买邮箱仍应继续当前注册；注册成功时还会把同一凭证写入账号 extra_json。
+        logger.warning(
+            "[Remail] 长效邮箱上下文文件写入失败，将依赖账号记录恢复: email=%s error=%s",
+            account.email,
+            f"{type(exc).__name__}: {str(exc)[:180]}",
+        )
+        return False
+
+
+def _context_from_registered_account(email: str) -> RemailAccount | None:
+    """迁移兼容：若独立上下文文件缺失，尝试从已保存账号 extra_json 恢复。"""
+    try:
+        from core import db
+
+        row = db.get_account_by_email(email)
+        raw_extra = (row or {}).get("extra_json") if isinstance(row, dict) else None
+        if isinstance(raw_extra, str):
+            raw_extra = json.loads(raw_extra) if raw_extra else {}
+        if isinstance(raw_extra, dict):
+            remail = raw_extra.get("remail")
+            account = _context_from_dict(remail if isinstance(remail, dict) else None)
+            if account and account.is_long_lived:
+                _persist_context(account)
+                return account
+    except Exception:
+        # 恢复失败不应阻断普通邮箱来源解析。
+        logger.debug("[Remail] 从账号记录恢复长效上下文失败", exc_info=True)
+    return None
+
+
+def export_account_context(email: str, *, include_secret: bool = True) -> dict | None:
+    """返回账号对应的长效上下文，供账号落库/补登服务使用。"""
+    account = get_account_context(email)
+    if account is None or not account.is_long_lived:
+        return None
+    return _context_to_dict(account, include_secret=include_secret)
+
+
+def is_long_lived_email(email: str) -> bool:
+    account = get_account_context(email)
+    return bool(account and account.is_long_lived)
 
 
 def _cache_key(email: str) -> str:
@@ -779,14 +951,32 @@ def pick_account() -> RemailAccount:
             email = str(order.get("deliveryEmail") or "").strip()
             token = str(order.get("serviceToken") or "").strip()
             order_no = str(order.get("orderNo") or "").strip()
+            try:
+                order_id = str(order.get("id") or "")
+            except Exception:
+                order_id = ""
             account = RemailAccount(
                 email=email,
                 service_token=token,
                 order_no=order_no,
                 project_id=selection.project_id,
                 product_id=selection.product_id,
+                service_mode=str(order.get("serviceMode") or selection.service_mode or "code"),
+                order_id=order_id,
+                status=str(order.get("status") or ""),
+                receive_started_at=str(order.get("receiveStartedAt") or ""),
+                receive_until=str(order.get("receiveUntil") or ""),
+                activated_at=str(order.get("activatedAt") or ""),
+                after_sale_until=str(order.get("afterSaleUntil") or ""),
+                last_mail_received_at=str(order.get("lastMailReceivedAt") or ""),
+                email_suffix=email.rsplit("@", 1)[-1].lower() if "@" in email else "",
+                created_at=str(order.get("createdAt") or ""),
+                updated_at=str(order.get("updatedAt") or ""),
             )
-            _CONTEXT_CACHE[_cache_key(email)] = account
+            with _CONTEXT_LOCK:
+                _CONTEXT_CACHE[_cache_key(email)] = account
+                # 短效模式保持原有进程内逻辑；只有长效购买写入磁盘，供未来补登。
+                _persist_context(account)
             logger.info(
                 "[Remail] 已领取%s邮箱: %s order=%s project=%s(%s) product=%s(%s)",
                 _service_mode_label(selection.service_mode),
@@ -824,13 +1014,41 @@ def get_email() -> str:
 
 
 def get_account_context(email: str) -> RemailAccount | None:
-    return _CONTEXT_CACHE.get(_cache_key(email))
+    key = _cache_key(email)
+    if not key:
+        return None
+    with _CONTEXT_LOCK:
+        cached = _CONTEXT_CACHE.get(key)
+        if cached is not None:
+            return cached
+        persisted = _load_persisted_contexts().get(key)
+        account = _context_from_dict(persisted)
+        if account is None:
+            account = _context_from_registered_account(email)
+        if account is not None:
+            _CONTEXT_CACHE[key] = account
+        return account
 
 
 def release_account(email: str, status: str = "available", note: str | None = None) -> None:
-    """Remail 邮箱不进入本地池，任务结束时只清理进程内服务凭证。"""
-    _CONTEXT_CACHE.pop(_cache_key(email), None)
-    logger.info("[Remail] 已释放邮箱上下文: %s（status=%s, note=%s）", email, status, note or "")
+    """释放 Remail 上下文；短效清理，长效保留 serviceToken 供后续补登。"""
+    key = _cache_key(email)
+    with _CONTEXT_LOCK:
+        account = _CONTEXT_CACHE.get(key) or _context_from_dict(_load_persisted_contexts().get(key))
+        if account is not None and account.is_long_lived:
+            # 订单状态由平台管理；注册任务失败也不能把已经购买的长效邮箱凭证丢掉。
+            _CONTEXT_CACHE[key] = account
+            _persist_context(account)
+            logger.info(
+                "[Remail] 已保留长效邮箱上下文: %s order=%s（status=%s, note=%s）",
+                email,
+                account.order_no or "-",
+                status,
+                note or "",
+            )
+            return
+        _CONTEXT_CACHE.pop(key, None)
+        logger.info("[Remail] 已释放短效邮箱上下文: %s（status=%s, note=%s）", email, status, note or "")
 
 
 def _timestamp(item: dict) -> float | None:

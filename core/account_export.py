@@ -395,6 +395,35 @@ def save_account_data(
     """
     from core.db import insert_account
     extra = extra or {}
+    # Remail 长效购买订单的邮箱/服务凭证必须随注册账号一起落盘，后续补登会从这里恢复。
+    # 短效接码不会写入任何持久化上下文，保持原有一次性逻辑。
+    try:
+        from core.remail_client import export_account_context
+
+        remail_context = export_account_context(email, include_secret=True)
+        if remail_context:
+            extra = dict(extra)
+            stored_remail = extra.get("remail") if isinstance(extra.get("remail"), dict) else {}
+            merged_remail = dict(stored_remail)
+            merged_remail.update(remail_context)
+            extra["remail"] = merged_remail
+    except Exception as exc:
+        logger.warning(
+            "[Remail] 长效邮箱上下文写入账号记录失败（不影响账号保存）: email=%s error=%s",
+            email,
+            f"{type(exc).__name__}: {str(exc)[:180]}",
+        )
+
+    # 记录注册时实际使用的驱动，补登时优先复用该驱动而不是当前 Codex 驱动。
+    if not extra.get("registration_driver"):
+        try:
+            from config import roxybrowser as _roxy_cfg
+
+            extra["registration_driver"] = str(
+                getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol"
+            ).strip().lower()
+        except Exception:
+            extra["registration_driver"] = "protocol"
     user = extra.get("user") or {}
     account = extra.get("account") or {}
     # 从 extra.codex 抽出顶层 codex 状态/错误，方便 WebUI 直接读账号字段

@@ -2528,6 +2528,7 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
             proxy_used=proxy or None,
             batch_dir=batch_dir,
             extra={
+                "registration_driver": "roxy",
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),
                 "expires": session_info.get("expires"),

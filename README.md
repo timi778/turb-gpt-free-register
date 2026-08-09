@@ -282,7 +282,9 @@ REMAIL_EMAIL_SUFFIXES=outlook.com,hotmail.com
 
 WebUI 中可以每行填写一个。每次下单会先检查所选商品公布的 `suffixes` 及库存，只在仍有库存的已配置后缀中等概率随机选择一个，并作为单个 `emailSuffix` 传给 Remail；留空则由平台自动分配后缀。
 
-短效模式按平台规则只用于当前接码订单；无论选择哪种模式，当前注册流程都依赖进程内保存的 `serviceToken`，领取邮箱后应在同一运行进程内完成注册和收码。
+短效模式按平台规则只用于当前接码订单，行为保持不变。长效模式会把注册邮箱、订单号、`serviceToken` 和平台返回的时间元数据持久化到本地账号记录，并在账号页显示「Remail」状态及「补登」按钮。可多选账号，也可以点击「全选长效」批量补登；补登会按每个账号注册时使用的驱动重新登录、从原长效邮箱收取 OTP，并更新 ChatGPT accessToken 与 Platform OAuth AT/RT。若逐账号自动上传已开启，获取到 RT 后会按完整 Codex 结构同步到 chatgpt2api。
+
+本项目不会按 24 小时或 `receiveUntil` 在本地阻止补登。平台返回的时间只用于界面提示；即使注册已过去一个月，只要 Remail 的 `serviceToken` 仍能通过取件接口收到新验证码，就仍可重新补登并获取新的 AT/RT。持久化文件 `remail_long_lived_accounts.json` 含敏感凭证，已加入 `.gitignore`，请勿外传。
 
 客户端默认优先直连 Remail，并在网络异常、SSL 中断或 HTTP `520`–`524` / `502`–`504` 时自动切换系统网络设置并退避重试。若多次重试后仍持续出现 `522`，表示平台源站当前不可达，需要等待服务恢复。
 
