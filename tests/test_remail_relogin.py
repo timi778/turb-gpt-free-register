@@ -52,7 +52,9 @@ class RemailLongLivedPersistenceTests(unittest.TestCase):
                         "verificationCode": "654321",
                     }],
                     "fetch": {"lastStatus": "succeeded"},
-                }) as request:
+                }) as request, patch.object(
+                    remail_client, "refresh_account_context", return_value=restored
+                ) as refresh:
                     code = remail_client.fetch_latest_otp(
                         account.email,
                         max_wait=1,
@@ -66,6 +68,7 @@ class RemailLongLivedPersistenceTests(unittest.TestCase):
                 params={"email": account.email, "token": "st-month-old"},
                 authenticated=False,
             )
+            refresh.assert_called_once_with(account.email)
 
     def test_short_lived_context_is_not_persisted_and_is_cleared_on_release(self):
         with tempfile.TemporaryDirectory() as td:
@@ -110,6 +113,112 @@ class RemailLongLivedPersistenceTests(unittest.TestCase):
             self.assertEqual(restored.service_token, "st-restore")
             self.assertTrue(persisted.exists())
             self.assertIn("st-restore", persisted.read_text(encoding="utf-8"))
+
+    def test_refresh_long_lived_context_persists_activation_and_warranty_times(self):
+        email = "refresh-times@outlook.test"
+        account = remail_client.RemailAccount(
+            email=email,
+            service_token="st-refresh-times",
+            order_no="R-REFRESH-TIMES",
+            project_id=1001,
+            product_id=2001,
+            service_mode="purchase",
+            receive_started_at="2026-08-10T06:39:53+08:00",
+            receive_until="2026-08-10T07:39:53+08:00",
+        )
+        order_payload = {
+            "order": {
+                "orderNo": "R-REFRESH-TIMES",
+                "status": "active",
+                "receiveStartedAt": "2026-08-10T06:39:53+08:00",
+                "receiveUntil": "2026-08-10T07:39:53+08:00",
+                "activatedAt": "2026-08-10T06:40:24+08:00",
+                "afterSaleUntil": "2026-08-11T06:39:53+08:00",
+                "lastMailReceivedAt": "2026-08-09T22:40:24Z",
+            }
+        }
+        with tempfile.TemporaryDirectory() as td:
+            persisted = Path(td) / "remail_long_lived_accounts.json"
+            remail_client._CONTEXT_CACHE[email] = account
+            with patch.object(remail_client, "_PERSISTED_CONTEXT_PATH", persisted), patch.object(
+                remail_client, "_request", return_value=order_payload
+            ) as request, patch.object(
+                db, "update_account_remail_context", return_value=True
+            ) as update_account:
+                refreshed = remail_client.refresh_account_context(email)
+
+            stored = json.loads(persisted.read_text(encoding="utf-8"))[email]
+
+        self.assertEqual(refreshed.activated_at, "2026-08-10T06:40:24+08:00")
+        self.assertEqual(refreshed.after_sale_until, "2026-08-11T06:39:53+08:00")
+        self.assertEqual(stored["activated_at"], "2026-08-10T06:40:24+08:00")
+        self.assertEqual(stored["after_sale_until"], "2026-08-11T06:39:53+08:00")
+        request.assert_called_once_with("GET", "/v1/open/orders/R-REFRESH-TIMES")
+        updated_context = update_account.call_args.args[1]
+        self.assertEqual(updated_context["activated_at"], "2026-08-10T06:40:24+08:00")
+        self.assertEqual(updated_context["after_sale_until"], "2026-08-11T06:39:53+08:00")
+
+    def test_batch_pickup_status_check_maps_success_and_api_error(self):
+        first = remail_client.RemailAccount(
+            email="pickup-ok@outlook.test",
+            service_token="st-pickup-ok",
+            order_no="R-PICKUP-OK",
+            project_id=1001,
+            product_id=2001,
+            service_mode="purchase",
+        )
+        second = remail_client.RemailAccount(
+            email="pickup-bad@outlook.test",
+            service_token="st-pickup-bad",
+            order_no="R-PICKUP-BAD",
+            project_id=1001,
+            product_id=2001,
+            service_mode="purchase",
+        )
+        remail_client._CONTEXT_CACHE[first.email] = first
+        remail_client._CONTEXT_CACHE[second.email] = second
+        response = [
+            {"index": 0, "status": "succeeded", "data": {"items": []}},
+            {
+                "index": 1,
+                "status": "failed",
+                "error": {"code": "credential_invalid", "message": "Credential expired."},
+            },
+        ]
+        with patch.object(remail_client, "_request", return_value=response) as request:
+            statuses = remail_client.check_pickup_statuses([first.email, second.email])
+
+        self.assertEqual(statuses[first.email]["status"], "available")
+        self.assertEqual(statuses[second.email]["status"], "credential_invalid")
+        request.assert_called_once_with(
+            "POST",
+            "/v1/pickup/batch",
+            json={"items": [
+                {"email": first.email, "token": first.service_token},
+                {"email": second.email, "token": second.service_token},
+            ]},
+            authenticated=False,
+            max_attempts=1,
+        )
+
+    def test_single_pickup_status_check_maps_rate_limit(self):
+        account = remail_client.RemailAccount(
+            email="pickup-rate@outlook.test",
+            service_token="st-pickup-rate",
+            order_no="R-PICKUP-RATE",
+            project_id=1001,
+            product_id=2001,
+            service_mode="purchase",
+        )
+        remail_client._CONTEXT_CACHE[account.email] = account
+        with patch.object(
+            remail_client,
+            "_request",
+            side_effect=remail_client.RemailError("Remail 请求失败: HTTP 429; rate_limited"),
+        ):
+            statuses = remail_client.check_pickup_statuses([account.email])
+
+        self.assertEqual(statuses[account.email]["status"], "rate_limited")
 
     @patch("core.plan_check_service.enqueue_account_plan_check", return_value={"accepted": True})
     @patch("core.chatgpt2api_client.auto_upload_registered_account")
@@ -252,6 +361,36 @@ class RemailReloginDatabaseTests(unittest.TestCase):
                 self.assertEqual(db.recover_interrupted_remail_relogins(), 1)
                 self.assertEqual(db.get_account(account_id)["remail_relogin_status"], "failed")
                 self.assertTrue(db.claim_account_remail_relogin(account_id))
+
+    def test_remail_context_refresh_updates_display_times_without_losing_token(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            paths = self._db_paths(root)
+            self._initialize(paths)
+            with patch.multiple(db, **paths):
+                account_id = db.insert_account(
+                    email="db-long@outlook.test",
+                    access_token="session-at",
+                    extra=self._long_lived_extra(),
+                )
+                self.assertTrue(db.update_account_remail_context(
+                    "db-long@outlook.test",
+                    {
+                        "receive_started_at": "2026-08-10T06:39:53+08:00",
+                        "receive_until": "2026-08-10T07:39:53+08:00",
+                        "activated_at": "2026-08-10T06:40:24+08:00",
+                        "after_sale_until": "2026-08-11T06:39:53+08:00",
+                    },
+                ))
+                decorated = db.get_account(account_id)
+
+            stored = json.loads(paths["_ACCOUNTS_JSON"].read_text(encoding="utf-8"))[0]
+            remail = json.loads(stored["extra_json"])["remail"]
+
+        self.assertEqual(decorated["remail_receive_until"], "2026-08-10T07:39:53+08:00")
+        self.assertEqual(decorated["remail_activated_at"], "2026-08-10T06:40:24+08:00")
+        self.assertEqual(decorated["remail_after_sale_until"], "2026-08-11T06:39:53+08:00")
+        self.assertEqual(remail["service_token"], "st-db-long")
 
     def test_static_viewer_never_embeds_remail_service_token(self):
         with tempfile.TemporaryDirectory() as td:
@@ -642,6 +781,90 @@ class RemailReloginWebUiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("不是 Remail 长效邮箱账号", response.get_json()["error"])
 
+    def test_refresh_metadata_api_returns_activation_times_without_service_token(self):
+        client = self._client()
+        email = "api-refresh@outlook.test"
+        account = {
+            "id": 19,
+            "email": email,
+            "remail_long_lived": True,
+        }
+        context = remail_client.RemailAccount(
+            email=email,
+            service_token="st-api-refresh-secret",
+            order_no="R-API-REFRESH",
+            project_id=1001,
+            product_id=2001,
+            service_mode="purchase",
+            status="active",
+            receive_until="2026-08-10T07:39:53+08:00",
+            activated_at="2026-08-10T06:40:24+08:00",
+            after_sale_until="2026-08-11T06:39:53+08:00",
+        )
+        with patch("webui.app.db.get_account", return_value=account), patch.object(
+            remail_client, "refresh_account_context", return_value=context
+        ) as refresh:
+            response = client.post(
+                "/api/accounts/remail-refresh-metadata",
+                json={"account_ids": [19]},
+            )
+
+        payload = response.get_json()
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["updated_count"], 1)
+        self.assertEqual(payload["items"][0]["remail_status"], "active")
+        self.assertEqual(payload["items"][0]["remail_activated_at"], "2026-08-10T06:40:24+08:00")
+        self.assertEqual(payload["items"][0]["remail_after_sale_until"], "2026-08-11T06:39:53+08:00")
+        self.assertNotIn("st-api-refresh-secret", serialized)
+        refresh.assert_called_once_with(email)
+
+    def test_pickup_status_api_returns_simplified_status_without_service_token(self):
+        client = self._client()
+        accounts = {
+            21: {
+                "id": 21,
+                "email": "pickup-ok@outlook.test",
+                "remail_long_lived": True,
+            },
+            22: {
+                "id": 22,
+                "email": "pickup-bad@outlook.test",
+                "remail_long_lived": True,
+            },
+        }
+        statuses = {
+            "pickup-ok@outlook.test": {
+                "status": "available",
+                "message": "取件凭证有效",
+                "checked_at": "2026-08-10T08:00:00+08:00",
+            },
+            "pickup-bad@outlook.test": {
+                "status": "credential_invalid",
+                "message": "Credential expired.",
+                "checked_at": "2026-08-10T08:00:00+08:00",
+            },
+        }
+        with patch("webui.app.db.get_account", side_effect=lambda acc_id: accounts.get(acc_id)), patch.object(
+            remail_client, "check_pickup_statuses", return_value=statuses
+        ) as check:
+            response = client.post(
+                "/api/accounts/remail-check-pickup",
+                json={"account_ids": [21, 22]},
+            )
+
+        payload = response.get_json()
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["checked_count"], 2)
+        self.assertEqual(payload["items"][0]["remail_pickup_status"], "available")
+        self.assertEqual(payload["items"][1]["remail_pickup_status"], "credential_invalid")
+        self.assertNotIn("service_token", serialized)
+        check.assert_called_once_with([
+            "pickup-ok@outlook.test",
+            "pickup-bad@outlook.test",
+        ])
+
     def test_page_contains_long_lived_selection_and_relogin_controls(self):
         client = self._client()
         page = client.get("/").get_data(as_text=True)
@@ -650,9 +873,21 @@ class RemailReloginWebUiTests(unittest.TestCase):
         self.assertIn("data-remail-relogin", page)
         self.assertIn("data-remail-relogin-log", page)
         self.assertIn('class="actions remail-actions"', page)
+        self.assertIn("remail-pickup-available", page)
+        self.assertIn("可收件", page)
+        self.assertIn("凭证失效", page)
+        self.assertIn("不可取件", page)
+        self.assertIn("服务异常", page)
+        self.assertIn("请求频繁", page)
+        self.assertIn("内部错误", page)
         self.assertIn('class="actions account-actions"', page)
         self.assertIn("remailReloginLogPanel", page)
         self.assertIn("btnCloseRemailReloginLog", page)
+        self.assertIn("首次激活截止：", page)
+        self.assertIn("已激活：", page)
+        self.assertIn("质保截止：", page)
+        self.assertNotIn("以 Remail 当前可取件状态为准", page)
+        self.assertNotIn("平台时间", page)
         self.assertIn("不会按固定 24 小时限制", page)
 
 

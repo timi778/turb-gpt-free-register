@@ -630,8 +630,11 @@ def _decorate_account(row: dict, group_by_id: dict[int, str] | None = None) -> d
     out["remail_service_mode"] = remail_mode
     out["remail_service_token_present"] = bool(remail_token)
     out["remail_order_no"] = str(remail.get("order_no") or remail.get("orderNo") or "")
+    out["remail_receive_started_at"] = str(remail.get("receive_started_at") or remail.get("receiveStartedAt") or "")
     out["remail_receive_until"] = str(remail.get("receive_until") or remail.get("receiveUntil") or "")
+    out["remail_activated_at"] = str(remail.get("activated_at") or remail.get("activatedAt") or "")
     out["remail_after_sale_until"] = str(remail.get("after_sale_until") or remail.get("afterSaleUntil") or "")
+    out["remail_last_mail_received_at"] = str(remail.get("last_mail_received_at") or remail.get("lastMailReceivedAt") or "")
     out["remail_status"] = str(remail.get("status") or "")
     out["remail_relogin_status"] = str(row.get("remail_relogin_status") or remail.get("relogin_status") or "never")
     out["remail_relogin_ok"] = row.get("remail_relogin_ok")
@@ -1022,6 +1025,27 @@ def _is_account_remail_long_lived(row: dict) -> bool:
         or ("purchase" if token else "")
     ).strip().lower()
     return mode == "purchase" and bool(token)
+
+
+def update_account_remail_context(email: str, context: dict | None) -> bool:
+    """合并 Remail 订单最新元数据，保留 serviceToken 和补登状态。"""
+    if not isinstance(context, dict) or not str(email or "").strip():
+        return False
+    with _LOCK:
+        rows = _load_accounts()
+        row = _find_by_email(rows, email)
+        if row is None or not _is_account_remail_long_lived(row):
+            return False
+        extra = _get_account_extra_dict(row)
+        remail = dict(extra.get("remail") or {})
+        for key, value in context.items():
+            if value not in (None, ""):
+                remail[key] = value
+        extra["remail"] = remail
+        row["extra_json"] = json.dumps(extra, ensure_ascii=False)
+        row["updated_at"] = _now()
+        _save_accounts(rows)
+        return True
 
 
 def claim_account_remail_relogin(acc_id: int, trigger: str = "manual") -> bool:

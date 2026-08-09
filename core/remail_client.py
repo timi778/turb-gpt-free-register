@@ -279,10 +279,13 @@ def _service_mode_label(mode: str) -> str:
 
 def _error_message(payload, response) -> str:
     if isinstance(payload, dict):
+        code = str(payload.get("code") or "").strip()
         for key in ("message", "error", "detail"):
             value = payload.get(key)
             if value:
-                return str(value)
+                return f"{code}: {value}" if code else str(value)
+        if code:
+            return code
         fields = payload.get("fields")
         if fields:
             return str(fields)
@@ -323,6 +326,7 @@ def _request(
     authenticated: bool = True,
     api_key_override: str | None = None,
     extra_headers: dict[str, str] | None = None,
+    max_attempts: int | None = None,
 ):
     headers = {"Accept": "application/json"}
     if authenticated:
@@ -330,8 +334,9 @@ def _request(
     if extra_headers:
         headers.update(extra_headers)
 
+    attempt_limit = max(1, int(max_attempts or REQUEST_MAX_ATTEMPTS))
     last_error: Exception | None = None
-    for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
+    for attempt in range(1, attempt_limit + 1):
         route_name, proxies = _route_for_attempt(attempt)
         try:
             response = requests.request(
@@ -346,7 +351,7 @@ def _request(
         except requests.RequestException as exc:
             last_error = exc
             error_name = type(exc).__name__
-            if attempt >= REQUEST_MAX_ATTEMPTS:
+            if attempt >= attempt_limit:
                 raise RemailError(
                     f"Remail 请求失败 ({path}, {route_name}): 网络异常 {error_name}"
                 ) from None
@@ -358,7 +363,7 @@ def _request(
                 delay,
                 next_route,
                 attempt + 1,
-                REQUEST_MAX_ATTEMPTS,
+                attempt_limit,
                 method,
                 path,
                 error_name,
@@ -377,7 +382,7 @@ def _request(
         retryable = status_code in _RETRYABLE_HTTP_STATUSES or (
             200 <= status_code < 300 and payload is None
         )
-        if retryable and attempt < REQUEST_MAX_ATTEMPTS:
+        if retryable and attempt < attempt_limit:
             retry_after = _retry_after(response)
             delay = _retry_delay(attempt, retry_after)
             next_route, _ = _route_for_attempt(attempt + 1)
@@ -388,7 +393,7 @@ def _request(
                 delay,
                 next_route,
                 attempt + 1,
-                REQUEST_MAX_ATTEMPTS,
+                attempt_limit,
                 method,
                 path,
                 status_code,
@@ -1030,6 +1035,54 @@ def get_account_context(email: str) -> RemailAccount | None:
         return account
 
 
+def refresh_account_context(email: str, *, update_registered_account: bool = True) -> RemailAccount:
+    """从订单详情刷新长效邮箱的激活、质保和收件时间。"""
+    account = get_account_context(email)
+    if account is None or not account.is_long_lived:
+        raise RemailError("Remail 长效邮箱上下文不存在")
+    if not str(account.order_no or "").strip():
+        raise RemailError("Remail 长效邮箱缺少订单号，无法刷新订单时间")
+
+    payload = _request(
+        "GET",
+        f"/v1/open/orders/{quote(str(account.order_no), safe='')}",
+    )
+    order = _order_from_payload(payload)
+    field_map = {
+        "status": "status",
+        "receiveStartedAt": "receive_started_at",
+        "receiveUntil": "receive_until",
+        "activatedAt": "activated_at",
+        "afterSaleUntil": "after_sale_until",
+        "lastMailReceivedAt": "last_mail_received_at",
+        "createdAt": "created_at",
+        "updatedAt": "updated_at",
+    }
+    with _CONTEXT_LOCK:
+        for source_key, target_attr in field_map.items():
+            value = order.get(source_key)
+            if value not in (None, ""):
+                setattr(account, target_attr, str(value))
+        _CONTEXT_CACHE[_cache_key(account.email)] = account
+        _persist_context(account)
+
+    if update_registered_account:
+        try:
+            from core import db
+
+            db.update_account_remail_context(
+                account.email,
+                _context_to_dict(account, include_secret=True),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Remail] 刷新订单时间后同步账号记录失败: email=%s error=%s",
+                account.email,
+                f"{type(exc).__name__}: {str(exc)[:180]}",
+            )
+    return account
+
+
 def release_account(email: str, status: str = "available", note: str | None = None) -> None:
     """释放 Remail 上下文；短效清理，长效保留 serviceToken 供后续补登。"""
     key = _cache_key(email)
@@ -1079,6 +1132,20 @@ def _next_fetch_delay(fetch_state: dict) -> float:
     return max(0.0, timestamp - time.time())
 
 
+def _finalize_received_otp(account: RemailAccount, otp: str) -> str:
+    """取码成功后刷新长效订单时间；刷新失败不影响验证码交付。"""
+    if account.is_long_lived:
+        try:
+            refresh_account_context(account.email)
+        except Exception as exc:
+            logger.warning(
+                "[Remail] 取码成功，但刷新长效订单时间失败（不影响验证码使用）: email=%s error=%s",
+                account.email,
+                f"{type(exc).__name__}: {str(exc)[:180]}",
+            )
+    return otp
+
+
 def _otp_item(item: dict) -> dict:
     return {
         "id": item.get("id"),
@@ -1107,6 +1174,166 @@ def _pickup(account: RemailAccount) -> dict:
         if isinstance(container.get("items"), list):
             return container
     raise RemailError("Remail 取件响应缺少 items 数组")
+
+
+def _pickup_status_from_error(exc: Exception) -> str:
+    text = str(exc or "").strip().lower()
+    if (
+        "credential_invalid" in text
+        or "credential is invalid" in text
+        or "取件链接无效" in text
+        or "凭证无效" in text
+        or "http 401" in text
+        or "http 403" in text
+    ):
+        return "credential_invalid"
+    if (
+        "order_unavailable" in text
+        or "order is unavailable" in text
+        or "订单当前不可" in text
+        or "http 404" in text
+        or "http 409" in text
+    ):
+        return "order_unavailable"
+    if "rate_limited" in text or "http 429" in text or "请求过于频繁" in text:
+        return "rate_limited"
+    if (
+        "service_unavailable" in text
+        or "service is temporarily unavailable" in text
+        or "http 503" in text
+        or "服务暂不可用" in text
+    ):
+        return "service_unavailable"
+    if "invalid_request" in text or "invalid request" in text or "http 400" in text or "http 422" in text:
+        return "invalid_request"
+    if "网络异常" in text or "网络连接失败" in text:
+        return "service_unavailable"
+    return "internal_error"
+
+
+def _pickup_payload_has_items(payload) -> bool:
+    return any(
+        isinstance(container.get("items"), list)
+        for container in _container_candidates(payload)
+    )
+
+
+def _pickup_batch_items(payload) -> list[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("data", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def check_pickup_statuses(emails) -> dict[str, dict]:
+    """批量检测长效邮箱取件凭证；只返回状态，不返回 serviceToken 或邮件内容。"""
+    checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    results: dict[str, dict] = {}
+    accounts: list[RemailAccount] = []
+    seen: set[str] = set()
+    for raw_email in emails or []:
+        email = str(raw_email or "").strip()
+        key = _cache_key(email)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        account = get_account_context(email)
+        if account is None or not account.is_long_lived or not account.service_token:
+            results[key] = {
+                "status": "credential_invalid",
+                "message": "缺少长效邮箱取件凭证",
+                "checked_at": checked_at,
+            }
+            continue
+        accounts.append(account)
+
+    if not accounts:
+        return results
+
+    if len(accounts) == 1:
+        account = accounts[0]
+        key = _cache_key(account.email)
+        try:
+            payload = _request(
+                "GET",
+                "/v1/pickup",
+                params={"email": account.email, "token": account.service_token},
+                authenticated=False,
+                max_attempts=1,
+            )
+            if not _pickup_payload_has_items(payload):
+                raise RemailError("Remail 取件响应缺少 items 数组")
+            results[key] = {
+                "status": "available",
+                "message": "取件凭证有效",
+                "checked_at": checked_at,
+            }
+        except Exception as exc:
+            results[key] = {
+                "status": _pickup_status_from_error(exc),
+                "message": str(exc)[:240],
+                "checked_at": checked_at,
+            }
+        return results
+
+    try:
+        payload = _request(
+            "POST",
+            "/v1/pickup/batch",
+            json={
+                "items": [
+                    {"email": account.email, "token": account.service_token}
+                    for account in accounts
+                ]
+            },
+            authenticated=False,
+            max_attempts=1,
+        )
+    except Exception as exc:
+        status = _pickup_status_from_error(exc)
+        for account in accounts:
+            results[_cache_key(account.email)] = {
+                "status": status,
+                "message": str(exc)[:240],
+                "checked_at": checked_at,
+            }
+        return results
+
+    items_by_index = {
+        int(item.get("index")): item
+        for item in _pickup_batch_items(payload)
+        if isinstance(item.get("index"), int)
+    }
+    allowed_errors = {
+        "credential_invalid",
+        "order_unavailable",
+        "service_unavailable",
+        "rate_limited",
+        "internal_error",
+        "invalid_request",
+    }
+    for index, account in enumerate(accounts):
+        item = items_by_index.get(index) or {}
+        key = _cache_key(account.email)
+        if str(item.get("status") or "").lower() == "succeeded":
+            results[key] = {
+                "status": "available",
+                "message": "取件凭证有效",
+                "checked_at": checked_at,
+            }
+            continue
+        error = item.get("error") if isinstance(item.get("error"), dict) else {}
+        code = str(error.get("code") or "internal_error").strip().lower()
+        results[key] = {
+            "status": code if code in allowed_errors else "internal_error",
+            "message": str(error.get("message") or code or "取件检测失败")[:240],
+            "checked_at": checked_at,
+        }
+    return results
 
 
 def _message_detail(account: RemailAccount, message_id) -> dict:
@@ -1152,7 +1379,7 @@ def fetch_latest_otp(
     logger.info("[Remail] 开始轮询邮箱 %s，最长 %ss", target, wait_seconds)
     while time.monotonic() <= deadline:
         if best_otp and settle_until is not None and time.monotonic() >= settle_until:
-            return best_otp
+            return _finalize_received_otp(account, best_otp)
 
         next_delay = float(interval)
         try:
@@ -1200,7 +1427,7 @@ def fetch_latest_otp(
 
             now = time.monotonic()
             if best_otp and settle_until is not None and now >= settle_until:
-                return best_otp
+                return _finalize_received_otp(account, best_otp)
         except RemailError as exc:
             last_error = str(exc)
             next_delay = max(next_delay, float(exc.retry_after or 0))
@@ -1211,10 +1438,10 @@ def fetch_latest_otp(
         if best_otp and settle_until is not None:
             settle_remaining = settle_until - time.monotonic()
             if settle_remaining <= 0:
-                return best_otp
+                return _finalize_received_otp(account, best_otp)
             next_delay = min(next_delay, settle_remaining)
         time.sleep(min(next_delay, remaining))
 
     if best_otp:
-        return best_otp
+        return _finalize_received_otp(account, best_otp)
     raise RemailError(f"等待 Remail 验证码超时: {target}; {last_error}")

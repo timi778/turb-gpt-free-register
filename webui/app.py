@@ -514,6 +514,125 @@ def create_app(auth_code: str | None = None) -> Flask:
         })
 
 
+    @app.post("/api/accounts/remail-refresh-metadata")
+    def api_accounts_remail_refresh_metadata():
+        """刷新长效 Remail 账号的激活与质保时间，不返回 serviceToken。"""
+        from core import remail_client
+
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 100:
+            return jsonify({"ok": False, "error": "单次最多刷新 100 个账号"}), 400
+
+        items = []
+        skipped = []
+        seen = set()
+        for raw_id in ids:
+            try:
+                acc_id = int(raw_id)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw_id, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            account = db.get_account(acc_id)
+            if not account:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            email = str(account.get("email") or "").strip()
+            if not account.get("remail_long_lived"):
+                skipped.append({"id": acc_id, "reason": "不是 Remail 长效邮箱账号"})
+                continue
+            try:
+                context = remail_client.refresh_account_context(email)
+            except Exception as exc:
+                skipped.append({
+                    "id": acc_id,
+                    "reason": f"{type(exc).__name__}: {str(exc)[:220]}",
+                })
+                continue
+            items.append({
+                "id": acc_id,
+                "remail_status": str(context.status or ""),
+                "remail_receive_started_at": str(context.receive_started_at or ""),
+                "remail_receive_until": str(context.receive_until or ""),
+                "remail_activated_at": str(context.activated_at or ""),
+                "remail_after_sale_until": str(context.after_sale_until or ""),
+                "remail_last_mail_received_at": str(context.last_mail_received_at or ""),
+            })
+        return jsonify({
+            "ok": True,
+            "items": items,
+            "updated_count": len(items),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+        })
+
+
+    @app.post("/api/accounts/remail-check-pickup")
+    def api_accounts_remail_check_pickup():
+        """批量检测长效 Remail 账号当前是否仍可取件，不返回 serviceToken 或邮件。"""
+        from core import remail_client
+
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 100:
+            return jsonify({"ok": False, "error": "单次最多检测 100 个账号"}), 400
+
+        accounts = []
+        skipped = []
+        seen = set()
+        for raw_id in ids:
+            try:
+                acc_id = int(raw_id)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw_id, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            account = db.get_account(acc_id)
+            if not account:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            if not account.get("remail_long_lived"):
+                skipped.append({"id": acc_id, "reason": "不是 Remail 长效邮箱账号"})
+                continue
+            accounts.append({
+                "id": acc_id,
+                "email": str(account.get("email") or "").strip(),
+            })
+
+        statuses = remail_client.check_pickup_statuses(
+            [account["email"] for account in accounts]
+        )
+        items = []
+        for account in accounts:
+            status = statuses.get(account["email"].lower()) or {
+                "status": "internal_error",
+                "message": "未返回检测结果",
+                "checked_at": "",
+            }
+            items.append({
+                "id": account["id"],
+                "remail_pickup_status": str(status.get("status") or "internal_error"),
+                "remail_pickup_status_message": str(status.get("message") or ""),
+                "remail_pickup_checked_at": str(status.get("checked_at") or ""),
+            })
+        return jsonify({
+            "ok": True,
+            "items": items,
+            "checked_count": len(items),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+        })
+
+
     @app.post("/api/accounts/check-plan")
     def api_account_check_plan():
         """把单账号套餐查询加入后台队列。Body {account_id|email, proxy?, timezone_offset_min?}"""

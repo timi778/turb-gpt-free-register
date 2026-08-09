@@ -139,7 +139,7 @@
     .accounts-table .col-token-life { width: 156px; }
     .accounts-table .col-plan { width: 340px; }
     .accounts-table .col-note { width: 180px; }
-    .accounts-table .col-remail { width: 178px; }
+    .accounts-table .col-remail { width: 334px; }
     .accounts-table .col-actions { width: 460px; }
     .accounts-table td:nth-child(10), .accounts-table th:nth-child(10) { overflow: visible; text-overflow: clip; }
     .token-countdown { min-width: 126px; font-variant-numeric: tabular-nums; }
@@ -147,7 +147,25 @@
     .remail-column { display: grid; gap: 6px; align-items: start; }
     .remail-actions { justify-self: start; }
     .remail-cell { display: grid; gap: 3px; min-width: 0; }
-    .remail-cell .sub-cell { white-space: normal; line-height: 1.35; }
+    .remail-meta { display: grid; gap: 2px; margin-top: 2px; }
+    .remail-meta-layout {
+      display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px;
+      align-items: center; min-width: 0;
+    }
+    .remail-meta-row {
+      display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 4px;
+      color: var(--muted); font-size: 12px; line-height: 1.45; white-space: normal;
+    }
+    .remail-meta-value { color: #475467; font-variant-numeric: tabular-nums; }
+    .remail-pickup-status { min-width: 64px; padding: 4px 10px; white-space: nowrap; }
+    .remail-pickup-checking { color: #175cd3; background: #eff8ff; }
+    .remail-pickup-available { color: #067647; background: #ecfdf3; }
+    .remail-pickup-credential { color: #b42318; background: #fef3f2; }
+    .remail-pickup-unavailable { color: #475467; background: #f2f4f7; }
+    .remail-pickup-service { color: #c4320a; background: #fff4ed; }
+    .remail-pickup-rate { color: #b54708; background: #fffaeb; }
+    .remail-pickup-internal { color: #912018; background: #fef3f2; }
+    .remail-pickup-invalid { color: #6941c6; background: #f4f3ff; }
     .outlook-table .col-actions { width: 220px; }
     .codex-table .col-actions { width: 260px; }
     th { position: sticky; top: 0; background: #fbfcfe; color: #475467; z-index: 1; font-size: 12px; }
@@ -1174,6 +1192,10 @@ async function pollLog() {
 let accountsLoading = false;
 let planStatusLoading = false;
 let planStatusRevision = '';
+let remailMetadataRefreshRunning = false;
+const REMAIL_METADATA_REFRESH_ATTEMPTED = new Set();
+let remailPickupStatusRefreshRunning = false;
+const REMAIL_PICKUP_STATUS_REFRESH_ATTEMPTED = new Set();
 function accountGroupScopedRows() {
   if (ACTIVE_ACCOUNT_GROUP_ID == null) return ACCOUNTS;
   return ACCOUNTS.filter(r => Number(r.group_id || 0) === Number(ACTIVE_ACCOUNT_GROUP_ID));
@@ -1231,6 +1253,76 @@ async function loadAccounts() {
     }
   } catch(e) {}
   finally { accountsLoading = false; }
+}
+async function refreshRemailMetadataForRows(rows) {
+  if (remailMetadataRefreshRunning) return;
+  const candidates = (rows || []).filter(account =>
+    !!account.remail_long_lived &&
+    !!account.remail_order_no &&
+    (!account.remail_activated_at || !account.remail_after_sale_until) &&
+    !REMAIL_METADATA_REFRESH_ATTEMPTED.has(Number(account.id))
+  );
+  if (!candidates.length) return;
+  candidates.forEach(account => REMAIL_METADATA_REFRESH_ATTEMPTED.add(Number(account.id)));
+  remailMetadataRefreshRunning = true;
+  let changed = false;
+  try {
+    const result = await api('/api/accounts/remail-refresh-metadata', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({account_ids: candidates.map(account => account.id)}),
+    });
+    const accountById = new Map(ACCOUNTS.map(account => [Number(account.id), account]));
+    (result.items || []).forEach(item => {
+      const account = accountById.get(Number(item.id));
+      if (account) {
+        Object.assign(account, item);
+        changed = true;
+      }
+    });
+  } catch(e) {
+    // 页面仍显示已保存的订单时间；下次重新打开页面会再次尝试同步。
+  } finally {
+    remailMetadataRefreshRunning = false;
+  }
+  if (changed) renderAccounts();
+}
+async function refreshRemailPickupStatusForRows(rows) {
+  if (remailPickupStatusRefreshRunning) return;
+  const candidates = (rows || []).filter(account =>
+    !!account.remail_long_lived &&
+    !REMAIL_PICKUP_STATUS_REFRESH_ATTEMPTED.has(Number(account.id))
+  );
+  if (!candidates.length) return;
+  candidates.forEach(account => REMAIL_PICKUP_STATUS_REFRESH_ATTEMPTED.add(Number(account.id)));
+  remailPickupStatusRefreshRunning = true;
+  let changed = false;
+  try {
+    const result = await api('/api/accounts/remail-check-pickup', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({account_ids: candidates.map(account => account.id)}),
+    });
+    const accountById = new Map(ACCOUNTS.map(account => [Number(account.id), account]));
+    (result.items || []).forEach(item => {
+      const account = accountById.get(Number(item.id));
+      if (account) {
+        Object.assign(account, item);
+        changed = true;
+      }
+    });
+  } catch(e) {
+    const checkedAt = new Date().toISOString();
+    candidates.forEach(account => {
+      account.remail_pickup_status = 'service_unavailable';
+      account.remail_pickup_status_message = e.message || '取件状态检测失败';
+      account.remail_pickup_checked_at = checkedAt;
+    });
+    changed = true;
+  } finally {
+    remailPickupStatusRefreshRunning = false;
+  }
+  if (changed) renderAccounts();
 }
 function renderGroupManagerList() {
   const list = $('#groupManagerList');
@@ -1584,14 +1676,33 @@ function _remailCell(r) {
     failed: ['补登失败', 'status-failed'],
     stopped: ['已停止', 'status-used'],
   }[status] || ['可补登', 'status-used'];
-  const until = _fmtPlanTime(r.remail_receive_until || r.remail_after_sale_until || '', false);
+  const receiveUntil = _fmtPlanTime(r.remail_receive_until || '', false) || '-';
+  const activatedAt = _fmtPlanTime(r.remail_activated_at || '', false) || '-';
+  const afterSaleUntil = _fmtPlanTime(r.remail_after_sale_until || '', false) || '-';
+  const pickupStatus = String(r.remail_pickup_status || 'checking').trim().toLowerCase();
+  const pickupMeta = {
+    checking: ['检测中', 'remail-pickup-checking'],
+    available: ['可收件', 'remail-pickup-available'],
+    credential_invalid: ['凭证失效', 'remail-pickup-credential'],
+    order_unavailable: ['不可取件', 'remail-pickup-unavailable'],
+    service_unavailable: ['服务异常', 'remail-pickup-service'],
+    rate_limited: ['请求频繁', 'remail-pickup-rate'],
+    internal_error: ['内部错误', 'remail-pickup-internal'],
+    invalid_request: ['参数错误', 'remail-pickup-invalid'],
+  }[pickupStatus] || ['检测失败', 'remail-pickup-internal'];
+  const pickupCheckedAt = _fmtPlanTime(r.remail_pickup_checked_at || '', false);
+  const pickupTitle = [
+    `收件状态：${pickupMeta[0]}`,
+    pickupCheckedAt ? `检测时间：${pickupCheckedAt}` : '',
+    r.remail_pickup_status_message || '',
+  ].filter(Boolean).join('；');
+  const pickupStatusHtml = `<span class="pill remail-pickup-status ${pickupMeta[1]}" title="${esc(pickupTitle)}">${esc(pickupMeta[0])}</span>`;
   const message = r.remail_relogin_error || r.remail_relogin_message || '';
   const detail = [
     r.remail_order_no ? `订单: ${r.remail_order_no}` : '',
-    until ? `平台标注时间: ${until}` : '',
     message,
   ].filter(Boolean).join('；');
-  return `<div class="remail-cell"><span class="pill ${meta[1]}" title="${esc(detail)}">长效 · ${meta[0]}</span>${until ? `<div class="sub-cell" title="${esc(until)}">平台时间 ${esc(until)}</div>` : ''}<div class="sub-cell">以 Remail 当前可取件状态为准</div></div>`;
+  return `<div class="remail-cell"><span class="pill ${meta[1]}" title="${esc(detail)}">长效 · ${meta[0]}</span><div class="remail-meta-layout"><div class="remail-meta"><div class="remail-meta-row"><span>首次激活截止：</span><span class="remail-meta-value" title="${esc(receiveUntil)}">${esc(receiveUntil)}</span></div><div class="remail-meta-row"><span>已激活：</span><span class="remail-meta-value" title="${esc(activatedAt)}">${esc(activatedAt)}</span></div><div class="remail-meta-row"><span>质保截止：</span><span class="remail-meta-value" title="${esc(afterSaleUntil)}">${esc(afterSaleUntil)}</span></div></div>${pickupStatusHtml}</div></div>`;
 }
 function _remailAction(r) {
   if (!r.remail_long_lived) return '';
@@ -1649,6 +1760,8 @@ function renderAccounts() {
   updateAccountSelectionUi(rows);
   updateTokenCountdowns();
   _renderPager('accounts', total);
+  refreshRemailMetadataForRows(rows);
+  refreshRemailPickupStatusForRows(rows);
 }
 
 function updateAccountSelectionUi(pageRows = null) {
