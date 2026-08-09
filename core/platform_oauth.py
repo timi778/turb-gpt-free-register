@@ -335,8 +335,136 @@ def _copy_selenium_cookies(driver, http_session) -> int:
     return copied
 
 
-def get_platform_oauth_tokens_selenium(driver, email: str, proxy: str | None = None) -> dict:
-    """导入 Selenium 登录态后，用一个 HTTP 会话完成 OAuth 全流程。"""
+def _is_missing_authorization_code_error(exc: Exception) -> bool:
+    return "Platform OAuth 未获取到 authorization code" in str(exc)
+
+
+def _complete_platform_authorization_in_selenium(
+    driver,
+    authorization: PlatformAuthorization,
+    email: str,
+    *,
+    otp_provider=None,
+    browser_helpers=None,
+) -> str:
+    """在同一浏览器完成 Platform OAuth 的邮箱 OTP 回退流程。
+
+    Platform OAuth 通常可由导入 Cookie 的 HTTP 会话直接完成。服务端要求
+    ``max_age=0`` 重认证时，HTTP 请求会停在邮箱验证页而没有 callback code；
+    此时必须回到原 Roxy 会话处理页面，避免另开浏览器后丢失设备指纹和 Cookie。
+    """
+    if otp_provider is None:
+        from core.email_provider import wait_for_otp
+        otp_provider = wait_for_otp
+    if browser_helpers is None:
+        from core import roxy_registration as browser_helpers
+
+    otp_after_ts = time.time()
+    try:
+        safe_get = getattr(browser_helpers, "_safe_get", None)
+        if callable(safe_get):
+            safe_get(
+                driver,
+                authorization.url,
+                timeout=45,
+                attempts=2,
+                accept_hosts=("auth.openai.com", "platform.openai.com"),
+            )
+        else:
+            driver.get(authorization.url)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Platform OAuth 浏览器授权页打开失败: {type(exc).__name__}: {str(exc)[:180]}"
+        ) from exc
+
+    timeout = max(30, int(getattr(_cfg, "CHATGPT2API_TIMEOUT", 30) or 30) * 3)
+    deadline = time.time() + timeout
+    otp_attempts = 0
+    login_submitted = False
+    passwordless_attempted = False
+
+    while time.time() < deadline:
+        current_url = str(getattr(driver, "current_url", "") or "")
+        try:
+            return extract_authorization_code(
+                current_url,
+                expected_state=authorization.state,
+            )
+        except Exception as exc:
+            if not _is_missing_authorization_code_error(exc):
+                raise
+
+        if browser_helpers._is_email_verification_page(driver):
+            otp_attempts += 1
+            if otp_attempts > 3:
+                raise RuntimeError("Platform OAuth 邮箱验证码连续错误或过期")
+            logger.info(
+                "[Platform OAuth] 浏览器要求邮箱验证，使用原邮箱来源接码: email=%s attempt=%s/3",
+                email,
+                otp_attempts,
+            )
+            code = otp_provider(email, after_ts=otp_after_ts)
+            browser_helpers._clear_otp_inputs(driver)
+            browser_helpers._type_otp(driver, code)
+            try:
+                browser_helpers._click_continue(driver)
+            except Exception:
+                # 部分 OTP 控件会在填满最后一格后自动提交。
+                pass
+            if browser_helpers._wait_after_email_otp_submit(driver, timeout=12) == "accepted":
+                continue
+            if otp_attempts >= 3:
+                raise RuntimeError("Platform OAuth 邮箱验证码连续错误或过期")
+            otp_after_ts = time.time()
+            browser_helpers._click_resend_email_otp(driver, timeout=25)
+            continue
+
+        # login_hint 通常会直接带到 OTP 页；少数页面仍要求先填写邮箱。
+        # 只尝试一次，并沿用注册流程中对第三方登录入口的保护。
+        if not login_submitted and browser_helpers._is_email_login_page_still_present(driver):
+            login_submitted = True
+            logger.info("[Platform OAuth] 浏览器要求重新输入邮箱: email=%s", email)
+            try:
+                next_state = browser_helpers._submit_email_and_wait_next(driver, email, attempts=1)
+            except RuntimeError:
+                # 注册辅助函数在登录密码页会主动报错；这里继续检查是否有安全的
+                # passwordless 入口，不能让这个预期分支中断 Platform OAuth。
+                if not browser_helpers._is_login_password_page(driver):
+                    raise
+                next_state = "login_password"
+            if next_state == "otp":
+                continue
+            if next_state == "logged_in":
+                continue
+
+        if browser_helpers._is_login_password_page(driver):
+            if not passwordless_attempted:
+                passwordless_attempted = True
+                result = browser_helpers._click_passwordless_signup_if_present(driver)
+                if result.get("ok"):
+                    logger.info(
+                        "[Platform OAuth] 登录密码页已切换到邮箱一次性验证码: email=%s",
+                        email,
+                    )
+                    continue
+            raise RuntimeError(
+                "Platform OAuth 需要密码重新登录，当前自动回退仅处理邮箱验证码"
+            )
+        time.sleep(0.5)
+
+    raise RuntimeError(
+        "Platform OAuth 浏览器授权超时，未获取到 authorization code"
+    )
+
+
+def get_platform_oauth_tokens_selenium(
+    driver,
+    email: str,
+    proxy: str | None = None,
+    *,
+    otp_provider=None,
+) -> dict:
+    """导入 Selenium 登录态后完成 OAuth；重认证时回到同一浏览器处理邮箱 OTP。"""
     from core.session import BrowserSession
 
     http_session = BrowserSession(proxy=proxy)
@@ -344,7 +472,43 @@ def get_platform_oauth_tokens_selenium(driver, email: str, proxy: str | None = N
     copied = _copy_selenium_cookies(driver, http_session)
     _ensure_http_oai_did(http_session, http_session.device_id)
     logger.debug("[Platform OAuth] Selenium Cookie 已导入 HTTP 会话: count=%s", copied)
-    return get_platform_oauth_tokens(http_session, email)
+    authorization = build_platform_authorization(email, http_session.device_id)
+    response = http_session.get(
+        authorization.url,
+        headers=_authorize_headers(http_session),
+        allow_redirects=True,
+    )
+    body = "" if "code=" in _response_url(response) else _response_text(response)
+    try:
+        code = extract_authorization_code(
+            _response_url(response),
+            expected_state=authorization.state,
+            response_body=body,
+        )
+    except Exception as exc:
+        if not _is_missing_authorization_code_error(exc):
+            raise
+        logger.info(
+            "[Platform OAuth] HTTP 授权未返回 callback code，回退同一浏览器处理重新认证: email=%s",
+            email,
+        )
+        code = _complete_platform_authorization_in_selenium(
+            driver,
+            authorization,
+            email,
+            otp_provider=otp_provider,
+        )
+        # 邮箱验证会轮换或新增 auth Cookie，回写 HTTP 会话后再换 token。
+        copied = _copy_selenium_cookies(driver, http_session)
+        _ensure_http_oai_did(http_session, authorization.device_id)
+        logger.debug("[Platform OAuth] OTP 后重新导入 Selenium Cookie: count=%s", copied)
+
+    token_response = http_session.post(
+        PLATFORM_TOKEN_URL,
+        headers=_token_headers(http_session),
+        data=_token_body(code, authorization.code_verifier),
+    )
+    return _validate_token_response(token_response)
 
 
 def finalize_platform_oauth(tokens: dict, email: str) -> dict:
@@ -457,5 +621,19 @@ def run_platform_oauth_playwright(context, email: str) -> dict:
     return _run(lambda: get_platform_oauth_tokens_playwright(context, email), email)
 
 
-def run_platform_oauth_selenium(driver, email: str, proxy: str | None = None) -> dict:
-    return _run(lambda: get_platform_oauth_tokens_selenium(driver, email, proxy=proxy), email)
+def run_platform_oauth_selenium(
+    driver,
+    email: str,
+    proxy: str | None = None,
+    *,
+    otp_provider=None,
+) -> dict:
+    return _run(
+        lambda: get_platform_oauth_tokens_selenium(
+            driver,
+            email,
+            proxy=proxy,
+            otp_provider=otp_provider,
+        ),
+        email,
+    )

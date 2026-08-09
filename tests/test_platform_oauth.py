@@ -98,6 +98,12 @@ class _SeleniumHttpSession(_Session):
         self.__class__.instances.append(self)
 
 
+class _SeleniumReauthHttpSession(_SeleniumHttpSession):
+    def get(self, url, **kwargs):
+        self.get_calls.append((url, kwargs))
+        return _Response(url="https://auth.openai.com/email-verification")
+
+
 class _SeleniumDriver:
     def __init__(self):
         self.cdp_calls = []
@@ -255,6 +261,158 @@ class PlatformOAuthTests(unittest.TestCase):
         self.assertIn("session-token", cookie_names)
         self.assertIn("oai-did", cookie_names)
         self.assertEqual(driver.cdp_calls[0][0], "Storage.getCookies")
+
+    @patch("core.platform_oauth._complete_platform_authorization_in_selenium")
+    @patch("core.session.BrowserSession", _SeleniumReauthHttpSession)
+    def test_selenium_path_uses_browser_otp_fallback_when_http_auth_needs_reauth(self, complete):
+        from core.platform_oauth import get_platform_oauth_tokens_selenium
+
+        _SeleniumReauthHttpSession.instances.clear()
+        driver = _SeleniumDriver()
+
+        def callback(_driver, authorization, _email, **_kwargs):
+            self.assertTrue(authorization.state)
+            return "otp-code"
+
+        complete.side_effect = callback
+        tokens = get_platform_oauth_tokens_selenium(driver, "user@example.com")
+
+        self.assertEqual(tokens["refresh_token"], "platform-rt")
+        complete.assert_called_once()
+        self.assertEqual(len(_SeleniumReauthHttpSession.instances), 1)
+        # 初始设备 ID + 初始 Cookie 导入 + OTP 后 Cookie 重导入。
+        self.assertEqual(len(driver.cdp_calls), 3)
+        http = _SeleniumReauthHttpSession.instances[0]
+        body = parse_qs(http.post_calls[0][1]["data"])
+        self.assertEqual(body["code"], ["otp-code"])
+
+    def test_browser_otp_fallback_uses_shared_email_provider(self):
+        from core.platform_oauth import (
+            _complete_platform_authorization_in_selenium,
+            build_platform_authorization,
+        )
+
+        authorization = build_platform_authorization("user@example.com", "device-123")
+
+        class Driver:
+            current_url = ""
+
+            def get(self, _url):
+                self.current_url = "https://auth.openai.com/email-verification"
+
+        driver = Driver()
+
+        class BrowserHelpers:
+            @staticmethod
+            def _is_email_verification_page(_driver):
+                return True
+
+            @staticmethod
+            def _clear_otp_inputs(_driver):
+                return None
+
+            @staticmethod
+            def _type_otp(_driver, _code):
+                return None
+
+            @staticmethod
+            def _click_continue(_driver):
+                return None
+
+            @staticmethod
+            def _wait_after_email_otp_submit(_driver, timeout):
+                assert timeout == 12
+                return accepted()
+
+        def accepted(*_args, **_kwargs):
+            driver.current_url = (
+                "https://platform.openai.com/auth/callback"
+                f"?code=otp-code&state={authorization.state}"
+            )
+            return "accepted"
+
+        with patch("core.email_provider.wait_for_otp", return_value="123456") as wait_otp:
+            code = _complete_platform_authorization_in_selenium(
+                driver,
+                authorization,
+                "user@example.com",
+                browser_helpers=BrowserHelpers,
+            )
+
+        self.assertEqual(code, "otp-code")
+        self.assertEqual(wait_otp.call_args.args[0], "user@example.com")
+        self.assertIn("after_ts", wait_otp.call_args.kwargs)
+
+    def test_browser_otp_fallback_switches_login_password_page_to_passwordless(self):
+        from core.platform_oauth import (
+            _complete_platform_authorization_in_selenium,
+            build_platform_authorization,
+        )
+
+        authorization = build_platform_authorization("user@example.com", "device-123")
+
+        class Driver:
+            current_url = ""
+
+            def get(self, _url):
+                self.current_url = "https://auth.openai.com/log-in/password"
+
+        driver = Driver()
+        state = {"otp": False, "passwordless_clicks": 0}
+
+        def accepted(*_args, **_kwargs):
+            driver.current_url = (
+                "https://platform.openai.com/auth/callback"
+                f"?code=passwordless-code&state={authorization.state}"
+            )
+            return "accepted"
+
+        class BrowserHelpers:
+            @staticmethod
+            def _is_email_verification_page(_driver):
+                return state["otp"]
+
+            @staticmethod
+            def _is_email_login_page_still_present(_driver):
+                return False
+
+            @staticmethod
+            def _is_login_password_page(_driver):
+                return not state["otp"]
+
+            @staticmethod
+            def _click_passwordless_signup_if_present(_driver):
+                state["otp"] = True
+                state["passwordless_clicks"] += 1
+                return {"ok": True}
+
+            @staticmethod
+            def _clear_otp_inputs(_driver):
+                return None
+
+            @staticmethod
+            def _type_otp(_driver, _code):
+                return None
+
+            @staticmethod
+            def _click_continue(_driver):
+                return None
+
+            @staticmethod
+            def _wait_after_email_otp_submit(_driver, timeout):
+                assert timeout == 12
+                return accepted()
+
+        code = _complete_platform_authorization_in_selenium(
+            driver,
+            authorization,
+            "user@example.com",
+            otp_provider=lambda _email, **_kwargs: "123456",
+            browser_helpers=BrowserHelpers,
+        )
+
+        self.assertEqual(code, "passwordless-code")
+        self.assertEqual(state["passwordless_clicks"], 1)
 
     @patch("core.codex_oauth.save_codex_credential")
     @patch("core.codex_oauth.build_codex_storage")
