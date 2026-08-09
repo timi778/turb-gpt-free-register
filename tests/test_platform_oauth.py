@@ -472,6 +472,13 @@ class RegistrationDriverPlatformOAuthHookTests(unittest.TestCase):
             "clear_existing_state=True",
         )
 
+    def test_roxy_waits_before_platform_oauth(self):
+        source = Path("core/roxy_registration.py").read_text(encoding="utf-8")
+        delay = "random.uniform(5.0, 10.0)"
+        oauth = "run_platform_oauth_selenium"
+        self.assertIn(delay, source)
+        self.assertLess(source.index(delay), source.index(oauth))
+
     def test_cloak_gets_platform_tokens_before_browser_state_is_cleared(self):
         self._assert_order(
             "core/cloakbrowser_registration.py",

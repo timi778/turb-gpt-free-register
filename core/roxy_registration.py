@@ -2481,6 +2481,14 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
         totp_secret = None
 
         # Roxy Codex OAuth 会清理浏览器状态；Platform OAuth 必须先复用注册 Cookie。
+        platform_oauth_delay = random.uniform(5.0, 10.0)
+        logger.info(
+            "[Roxy注册][Platform OAuth] 注册完成，%.1f 秒后开始获取 RT：%s",
+            platform_oauth_delay,
+            email,
+        )
+        time.sleep(platform_oauth_delay)
+        _check_manual_stop()
         from core.platform_oauth import run_platform_oauth_selenium
         platform_oauth_result = run_platform_oauth_selenium(
             driver, email, proxy=proxy
