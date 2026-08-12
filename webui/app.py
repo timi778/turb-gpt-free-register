@@ -581,8 +581,8 @@ def create_app(auth_code: str | None = None) -> Flask:
         ids = data.get("account_ids") or data.get("ids") or []
         if not isinstance(ids, list) or not ids:
             return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
-        if len(ids) > 100:
-            return jsonify({"ok": False, "error": "单次最多检测 100 个账号"}), 400
+        if len(ids) > 5:
+            return jsonify({"ok": False, "error": "单次最多检测 5 个账号"}), 400
 
         accounts = []
         skipped = []
@@ -1718,6 +1718,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         manual_otp_required = not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", True))
         rows = db.list_jobs(limit=limit)
         for row in rows:
+            row.pop("email_context", None)
             row["manual_otp_required"] = manual_otp_required
             if not row.get("platform_oauth_status"):
                 row["platform_oauth_status"] = (
@@ -1774,6 +1775,8 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "error": "手动模式建议每次只跑 1 个任务（同一 REGISTER_EMAIL）。请把数量设为 1。",
                 }), 400
             jobs, group = submit_with_optional_group()
+            for job in jobs:
+                job.pop("email_context", None)
             return jsonify({
                 "ok": True,
                 "submitted": len(jobs),
@@ -1867,6 +1870,8 @@ def create_app(auth_code: str | None = None) -> Flask:
             if pool.get("available", 0) < count:
                 warning = f"可用邮箱仅 {pool.get('available', 0)} 个，少于任务数 {count}，不足的会失败"
         jobs, group = submit_with_optional_group()
+        for job in jobs:
+            job.pop("email_context", None)
         return jsonify({
             "ok": True,
             "submitted": len(jobs),
@@ -2028,6 +2033,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         job = db.get_job(job_id)
         if not job:
             return jsonify({"ok": False, "error": "任务不存在"}), 404
+        job.pop("email_context", None)
         return jsonify({
             "ok": True,
             "job": job,

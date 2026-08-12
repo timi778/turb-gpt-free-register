@@ -166,6 +166,16 @@
     .remail-pickup-rate { color: #b54708; background: #fffaeb; }
     .remail-pickup-internal { color: #912018; background: #fef3f2; }
     .remail-pickup-invalid { color: #6941c6; background: #f4f3ff; }
+    .remail-pickup-status-wrap { display: inline-flex; align-items: center; gap: 3px; }
+    .remail-pickup-refresh {
+      width: 20px; height: 20px; min-width: 20px; min-height: 20px; padding: 2px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 0; border-radius: 50%; background: transparent; color: var(--blue); cursor: pointer;
+    }
+    .remail-pickup-refresh:hover { background: #e0ebff; }
+    .remail-pickup-refresh:disabled { color: #98a2b3; cursor: wait; }
+    .remail-pickup-refresh svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; }
+    .remail-pickup-refresh.loading svg { animation: remail-wallet-spin .8s linear infinite; }
     .outlook-table .col-actions { width: 220px; }
     .codex-table .col-actions { width: 260px; }
     th { position: sticky; top: 0; background: #fbfcfe; color: #475467; z-index: 1; font-size: 12px; }
@@ -490,6 +500,9 @@
           <button class="btn good" id="btnDownloadSelectedPasswordsTxt" disabled title="把选中账号的邮箱和已保存密码保存为 TXT 文件">下载账号密码TXT</button>
           <button class="btn" id="btnDeleteSelectedAccounts" disabled title="删除选中的本地账号/token记录">删除选中</button>
           <button class="btn" id="btnManageGroups" title="编辑或删除注册批次分组；删除分组不会删除账号">管理分组</button>
+          <button type="button" class="btn" id="btnRefreshAccounts" title="刷新账号管理并重新检测当前页收件状态" aria-label="刷新账号管理">
+            <svg viewBox="0 0 24 24" aria-hidden="true" style="width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2;"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+          </button>
           <button class="btn primary" id="copyAllTokens">复制全部 Token</button>
           <button class="btn good" id="copyAllLines">复制全部整行</button>
         </div>
@@ -763,7 +776,7 @@ function activateTab(tab, persist=true) {
   $$('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
   allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
-  if (tab === 'accounts') loadAccounts();
+  if (tab === 'accounts') loadAccounts({refreshPickup: true});
   if (tab === 'codex') loadCodex();
   if (tab === 'outlook') loadOutlook();
   if (tab === 'config') loadConfig();
@@ -1195,7 +1208,10 @@ let planStatusRevision = '';
 let remailMetadataRefreshRunning = false;
 const REMAIL_METADATA_REFRESH_ATTEMPTED = new Set();
 let remailPickupStatusRefreshRunning = false;
-const REMAIL_PICKUP_STATUS_REFRESH_ATTEMPTED = new Set();
+let remailPickupStatusGeneration = 0;
+const REMAIL_PICKUP_STATUS_CACHE = new Map();
+const REMAIL_PICKUP_REQUEST_VERSION = new Map();
+const REMAIL_PICKUP_ACTIVE_CONTROLLERS = new Set();
 function accountGroupScopedRows() {
   if (ACTIVE_ACCOUNT_GROUP_ID == null) return ACCOUNTS;
   return ACCOUNTS.filter(r => Number(r.group_id || 0) === Number(ACTIVE_ACCOUNT_GROUP_ID));
@@ -1230,9 +1246,10 @@ async function loadAccountGroups() {
     renderGroupManagerList();
   } catch(e) {}
 }
-async function loadAccounts() {
+async function loadAccounts({refreshPickup = false} = {}) {
   if (accountsLoading) return;
   accountsLoading = true;
+  let loaded = false;
   try {
     const [accounts, groups, oauthSnapshot] = await Promise.all([
       api('/api/accounts?limit=2000'),
@@ -1241,6 +1258,11 @@ async function loadAccounts() {
     ]);
     const oauthById = new Map((oauthSnapshot.items || []).map(item => [Number(item.id), item]));
     ACCOUNTS = accounts.map(account => Object.assign(account, oauthById.get(Number(account.id)) || {}));
+    ACCOUNTS.forEach(account => {
+      const cached = REMAIL_PICKUP_STATUS_CACHE.get(Number(account.id));
+      if (cached) Object.assign(account, cached);
+      else if (account.remail_long_lived) account.remail_pickup_status = 'idle';
+    });
     ACCOUNT_GROUPS = groups;
     renderAccountGroupTabs();
     renderAccounts();
@@ -1251,8 +1273,15 @@ async function loadAccounts() {
         startRemailReloginLogPolling();
       }
     }
+    loaded = true;
   } catch(e) {}
   finally { accountsLoading = false; }
+  if (loaded && refreshPickup) {
+    const p = PAGERS.accounts;
+    const filtered = accountFilteredRows();
+    const rows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
+    refreshRemailPickupStatusForRows(rows, {restart: true});
+  }
 }
 async function refreshRemailMetadataForRows(rows) {
   if (remailMetadataRefreshRunning) return;
@@ -1287,42 +1316,123 @@ async function refreshRemailMetadataForRows(rows) {
   }
   if (changed) renderAccounts();
 }
-async function refreshRemailPickupStatusForRows(rows) {
-  if (remailPickupStatusRefreshRunning) return;
-  const candidates = (rows || []).filter(account =>
-    !!account.remail_long_lived &&
-    !REMAIL_PICKUP_STATUS_REFRESH_ATTEMPTED.has(Number(account.id))
-  );
-  if (!candidates.length) return;
-  candidates.forEach(account => REMAIL_PICKUP_STATUS_REFRESH_ATTEMPTED.add(Number(account.id)));
-  remailPickupStatusRefreshRunning = true;
-  let changed = false;
+function abortRemailPickupChecks() {
+  REMAIL_PICKUP_ACTIVE_CONTROLLERS.forEach(controller => controller.abort());
+  REMAIL_PICKUP_ACTIVE_CONTROLLERS.clear();
+}
+function cacheRemailPickupState(account, state) {
+  if (!account) return;
+  Object.assign(account, state);
+  REMAIL_PICKUP_STATUS_CACHE.set(Number(account.id), {
+    remail_pickup_status: account.remail_pickup_status,
+    remail_pickup_status_message: account.remail_pickup_status_message || '',
+    remail_pickup_checked_at: account.remail_pickup_checked_at || '',
+    remail_pickup_timed_out: !!account.remail_pickup_timed_out,
+  });
+}
+async function checkRemailPickupBatch(candidates, generation) {
+  if (!candidates.length || generation !== remailPickupStatusGeneration) return;
+  const versions = new Map();
+  candidates.forEach(account => {
+    const id = Number(account.id);
+    const version = (REMAIL_PICKUP_REQUEST_VERSION.get(id) || 0) + 1;
+    REMAIL_PICKUP_REQUEST_VERSION.set(id, version);
+    versions.set(id, version);
+    cacheRemailPickupState(account, {
+      remail_pickup_status: 'checking',
+      remail_pickup_status_message: '',
+      remail_pickup_checked_at: '',
+      remail_pickup_timed_out: false,
+    });
+  });
+  renderAccounts();
+  const controller = new AbortController();
+  REMAIL_PICKUP_ACTIVE_CONTROLLERS.add(controller);
+  let timedOut = false;
+  const startedAt = Date.now();
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 15000);
   try {
     const result = await api('/api/accounts/remail-check-pickup', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({account_ids: candidates.map(account => account.id)}),
+      signal: controller.signal,
     });
+    if (generation !== remailPickupStatusGeneration) return;
+    if (Date.now() - startedAt >= 15000) {
+      timedOut = true;
+      throw new Error('检测超过 15 秒');
+    }
     const accountById = new Map(ACCOUNTS.map(account => [Number(account.id), account]));
     (result.items || []).forEach(item => {
-      const account = accountById.get(Number(item.id));
-      if (account) {
-        Object.assign(account, item);
-        changed = true;
-      }
+      const id = Number(item.id);
+      const account = accountById.get(id);
+      if (!account || REMAIL_PICKUP_REQUEST_VERSION.get(id) !== versions.get(id)) return;
+      cacheRemailPickupState(account, Object.assign({}, item, {remail_pickup_timed_out: false}));
     });
   } catch(e) {
-    const checkedAt = new Date().toISOString();
+    if (generation !== remailPickupStatusGeneration) return;
     candidates.forEach(account => {
-      account.remail_pickup_status = 'service_unavailable';
-      account.remail_pickup_status_message = e.message || '取件状态检测失败';
-      account.remail_pickup_checked_at = checkedAt;
+      const id = Number(account.id);
+      if (REMAIL_PICKUP_REQUEST_VERSION.get(id) !== versions.get(id)) return;
+      cacheRemailPickupState(account, timedOut ? {
+        remail_pickup_status: 'checking',
+        remail_pickup_status_message: '检测超过 15 秒，可单独刷新',
+        remail_pickup_checked_at: '',
+        remail_pickup_timed_out: true,
+      } : {
+        remail_pickup_status: 'service_unavailable',
+        remail_pickup_status_message: e.message || '取件状态检测失败',
+        remail_pickup_checked_at: new Date().toISOString(),
+        remail_pickup_timed_out: false,
+      });
     });
-    changed = true;
   } finally {
-    remailPickupStatusRefreshRunning = false;
+    clearTimeout(timeout);
+    REMAIL_PICKUP_ACTIVE_CONTROLLERS.delete(controller);
+    if (generation === remailPickupStatusGeneration) renderAccounts();
   }
-  if (changed) renderAccounts();
+}
+async function refreshRemailPickupStatusForRows(rows, {restart = false} = {}) {
+  if (restart) {
+    remailPickupStatusGeneration += 1;
+    abortRemailPickupChecks();
+    remailPickupStatusRefreshRunning = false;
+    REMAIL_PICKUP_STATUS_CACHE.clear();
+    REMAIL_PICKUP_REQUEST_VERSION.clear();
+  } else if (remailPickupStatusRefreshRunning) {
+    return;
+  }
+  const generation = remailPickupStatusGeneration;
+  const candidates = (rows || []).filter(account => !!account.remail_long_lived);
+  if (!candidates.length) return;
+  candidates.forEach(account => cacheRemailPickupState(account, {
+    remail_pickup_status: 'checking',
+    remail_pickup_status_message: '',
+    remail_pickup_checked_at: '',
+    remail_pickup_timed_out: false,
+  }));
+  renderAccounts();
+  remailPickupStatusRefreshRunning = true;
+  try {
+    for (let offset = 0; offset < candidates.length; offset += 5) {
+      if (generation !== remailPickupStatusGeneration) break;
+      await checkRemailPickupBatch(candidates.slice(offset, offset + 5), generation);
+      if (offset + 5 < candidates.length && generation === remailPickupStatusGeneration) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+  } finally {
+    if (generation === remailPickupStatusGeneration) remailPickupStatusRefreshRunning = false;
+  }
+}
+async function refreshOneRemailPickup(accountId) {
+  const account = ACCOUNTS.find(item => Number(item.id) === Number(accountId));
+  if (!account || !account.remail_long_lived) return;
+  await checkRemailPickupBatch([account], remailPickupStatusGeneration);
 }
 function renderGroupManagerList() {
   const list = $('#groupManagerList');
@@ -1681,6 +1791,7 @@ function _remailCell(r) {
   const afterSaleUntil = _fmtPlanTime(r.remail_after_sale_until || '', false) || '-';
   const pickupStatus = String(r.remail_pickup_status || 'checking').trim().toLowerCase();
   const pickupMeta = {
+    idle: ['待检测', 'remail-pickup-checking'],
     checking: ['检测中', 'remail-pickup-checking'],
     available: ['可收件', 'remail-pickup-available'],
     credential_invalid: ['凭证失效', 'remail-pickup-credential'],
@@ -1696,7 +1807,10 @@ function _remailCell(r) {
     pickupCheckedAt ? `检测时间：${pickupCheckedAt}` : '',
     r.remail_pickup_status_message || '',
   ].filter(Boolean).join('；');
-  const pickupStatusHtml = `<span class="pill remail-pickup-status ${pickupMeta[1]}" title="${esc(pickupTitle)}">${esc(pickupMeta[0])}</span>`;
+  const pickupRefreshHtml = r.remail_pickup_timed_out
+    ? `<button type="button" class="remail-pickup-refresh" data-remail-pickup-refresh="${esc(r.id)}" title="单独刷新该邮箱收件状态" aria-label="单独刷新 ${esc(r.email)} 收件状态"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>`
+    : '';
+  const pickupStatusHtml = `<span class="remail-pickup-status-wrap"><span class="pill remail-pickup-status ${pickupMeta[1]}" title="${esc(pickupTitle)}">${esc(pickupMeta[0])}</span>${pickupRefreshHtml}</span>`;
   const message = r.remail_relogin_error || r.remail_relogin_message || '';
   const detail = [
     r.remail_order_no ? `订单: ${r.remail_order_no}` : '',
@@ -1761,7 +1875,6 @@ function renderAccounts() {
   updateTokenCountdowns();
   _renderPager('accounts', total);
   refreshRemailMetadataForRows(rows);
-  refreshRemailPickupStatusForRows(rows);
 }
 
 function updateAccountSelectionUi(pageRows = null) {
@@ -2029,6 +2142,13 @@ async function reloginSelectedRemail() {
 
 // 账号操作按钮（事件委托）
 $('#accountsBody').addEventListener('click', async (e) => {
+  const pickupRefreshBtn = e.target.closest('[data-remail-pickup-refresh]');
+  if (pickupRefreshBtn) {
+    pickupRefreshBtn.disabled = true;
+    pickupRefreshBtn.classList.add('loading');
+    await refreshOneRemailPickup(Number(pickupRefreshBtn.dataset.remailPickupRefresh));
+    return;
+  }
   const remailLogBtn = e.target.closest('[data-remail-relogin-log]');
   if (remailLogBtn) {
     openRemailReloginLog(remailLogBtn.dataset.remailReloginLog);
@@ -2166,6 +2286,15 @@ $('#btnCheckSelectedPlans').addEventListener('click', checkSelectedPlans);
 $('#btnReloginSelectedRemail').addEventListener('click', reloginSelectedRemail);
 $('#btnSelectAllLongLivedRemail').addEventListener('click', selectAllLongLivedRemail);
 $('#btnClearLongLivedRemail').addEventListener('click', clearAllLongLivedRemail);
+$('#btnRefreshAccounts').addEventListener('click', async () => {
+  const btn = $('#btnRefreshAccounts');
+  btn.disabled = true;
+  try {
+    await loadAccounts({refreshPickup: true});
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 
 function copySelectedAccountLines() {

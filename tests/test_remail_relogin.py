@@ -199,6 +199,7 @@ class RemailLongLivedPersistenceTests(unittest.TestCase):
             ]},
             authenticated=False,
             max_attempts=1,
+            timeout=remail_client.PICKUP_STATUS_TIMEOUT,
         )
 
     def test_single_pickup_status_check_maps_rate_limit(self):
@@ -865,6 +866,16 @@ class RemailReloginWebUiTests(unittest.TestCase):
             "pickup-bad@outlook.test",
         ])
 
+    def test_pickup_status_api_limits_each_batch_to_five_accounts(self):
+        client = self._client()
+        response = client.post(
+            "/api/accounts/remail-check-pickup",
+            json={"account_ids": [1, 2, 3, 4, 5, 6]},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("最多检测 5 个", response.get_json()["error"])
+
     def test_page_contains_long_lived_selection_and_relogin_controls(self):
         client = self._client()
         page = client.get("/").get_data(as_text=True)
@@ -874,6 +885,12 @@ class RemailReloginWebUiTests(unittest.TestCase):
         self.assertIn("data-remail-relogin-log", page)
         self.assertIn('class="actions remail-actions"', page)
         self.assertIn("remail-pickup-available", page)
+        self.assertIn("data-remail-pickup-refresh", page)
+        self.assertIn("setTimeout(() =>", page)
+        self.assertIn("}, 15000)", page)
+        self.assertIn("offset += 5", page)
+        self.assertIn("setTimeout(resolve, 1000)", page)
+        self.assertNotIn("refreshRemailPickupStatusForRows(rows);", page)
         self.assertIn("可收件", page)
         self.assertIn("凭证失效", page)
         self.assertIn("不可取件", page)

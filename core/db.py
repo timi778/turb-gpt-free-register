@@ -524,6 +524,10 @@ def _load_jobs() -> list[dict]:
 
 def _save_jobs(rows: list[dict]) -> None:
     _write_json(_JOBS_JSON, rows)
+    try:
+        _JOBS_JSON.chmod(0o600)
+    except OSError:
+        pass
 
 
 def _load_account_groups() -> list[dict]:
@@ -2488,6 +2492,7 @@ def _new_job_row(
     email: str | None = None,
     account_id: int | None = None,
     group_id: int | None = None,
+    email_context: dict | None = None,
 ) -> dict:
     job_uuid = str(uuid.uuid4())
     log_file = str(_LOG_DIR / f"{job_uuid}.log")
@@ -2502,6 +2507,7 @@ def _new_job_row(
         "retry_action": retry_action,
         "email_source": email_source,
         "email": email,
+        "email_context": dict(email_context) if isinstance(email_context, dict) else None,
         "status": "pending",
         "error_message": None,
         "log_file": log_file,
@@ -2530,6 +2536,7 @@ def create_retry_job(
     email_source: str,
     email: str | None = None,
     account_id: int | None = None,
+    email_context: dict | None = None,
 ) -> tuple[dict, bool]:
     """原子创建重试子任务；同一任务链已有活跃任务时直接复用。"""
     with _LOCK:
@@ -2569,6 +2576,7 @@ def create_retry_job(
             email=email,
             account_id=account_id,
             group_id=source.get("group_id"),
+            email_context=email_context,
         )
         rows.append(row)
         _save_jobs(rows)
@@ -2585,6 +2593,7 @@ def update_job(
     completed_at: str | None = None,
     account_id: int | None = None,
     platform_oauth_snapshot: dict | None = None,
+    email_context: dict | None = None,
 ) -> None:
     with _LOCK:
         rows = _load_jobs()
@@ -2595,6 +2604,8 @@ def update_job(
             row["status"] = status
         if email is not None:
             row["email"] = email
+        if isinstance(email_context, dict):
+            row["email_context"] = dict(email_context)
         if error is not None:
             row["error_message"] = error
         if started_at is not None:

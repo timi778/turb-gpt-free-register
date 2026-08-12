@@ -151,7 +151,7 @@ def _random_display_name() -> str:
     return random_display_name()
 
 
-def _prepare_registration_args() -> tuple[str, str, str]:
+def _prepare_registration_args(preferred_email: str | None = None) -> tuple[str, str, str]:
     """复用 CLI 的默认规则，为旧 Web 任务入口补齐注册参数。"""
     # 用模块属性读，支持 WebUI 热加载
     from config import register as _r, email as _e
@@ -171,7 +171,9 @@ def _prepare_registration_args() -> tuple[str, str, str]:
     birthday = generate_random_birthday()
 
     # 邮箱领取会把池状态置为 used，因此放在所有其他准备逻辑之后。
-    if not email:
+    if preferred_email:
+        email = preferred_email
+    elif not email:
         if _e.USE_EMAIL_SERVICE:
             email = acquire_email()
         else:
@@ -181,6 +183,59 @@ def _prepare_registration_args() -> tuple[str, str, str]:
             )
 
     return email, name, birthday
+
+
+def _restore_job_email_context(context: object) -> dict | None:
+    """恢复任务保存的邮箱上下文，并返回规范化快照用于再次保存。"""
+    if not isinstance(context, dict):
+        return None
+    source = str(context.get("source") or "").strip().lower()
+    if source != "remail":
+        return None
+    try:
+        from core import remail_client
+
+        account = remail_client.restore_account_context(context.get("context"))
+        if account is None:
+            return None
+        exported = remail_client.export_task_context(account.email)
+        return {"source": "remail", "context": exported} if exported else None
+    except Exception:
+        logger.exception("[Service] 恢复 Remail 订单上下文失败")
+        return None
+
+
+def _capture_job_email_context(email: str | None) -> dict | None:
+    if not email:
+        return None
+    try:
+        from core.email_provider import resolve_email_source
+
+        source = resolve_email_source(email)
+    except Exception:
+        logger.exception("[Service] 判断邮箱来源失败，跳过任务上下文保存: email=%s", email)
+        return None
+    if source != "remail":
+        return None
+    try:
+        from core import remail_client
+
+        context = remail_client.export_task_context(email)
+        if not context:
+            raise RuntimeError("Remail 邮箱已经领取，但订单上下文未保存")
+        return {"source": "remail", "context": context}
+    except Exception:
+        logger.exception("[Service] 保存 Remail 订单上下文失败: email=%s", email)
+        raise
+
+
+def _public_job(job: dict | None) -> dict | None:
+    """移除仅供任务恢复使用的邮箱凭证，避免进入 Web API 响应。"""
+    if not isinstance(job, dict):
+        return None
+    public = dict(job)
+    public.pop("email_context", None)
+    return public
 
 
 def _release_unconsumed_job_email(email: str | None, reason: str) -> None:
@@ -353,8 +408,22 @@ def _run_one_job(job_id: int, log_file: str) -> None:
         with _JobLogContext(log_file):
             from main import run_registration
             log_logger.info(f"[Job {job_id}] 开始注册任务")
-            email, name, birthday = _prepare_registration_args()
-            db.update_job(job_id, email=email)
+            raw_context = current.get("email_context")
+            saved_context = _restore_job_email_context(raw_context)
+            if isinstance(raw_context, dict) and saved_context is None:
+                raise RuntimeError("已购 Remail 邮箱订单上下文无法恢复，已停止重试以避免重复下单")
+            if saved_context is None and current.get("retry_action") == "registration" and current.get("email"):
+                # 兼容本次升级前创建、但长效上下文仍可从磁盘恢复的重试任务。
+                saved_context = _capture_job_email_context(str(current.get("email") or "").strip())
+            preferred_email = None
+            if saved_context:
+                preferred_email = str((saved_context.get("context") or {}).get("email") or "").strip() or None
+            elif current.get("retry_action") == "registration" and str(current.get("email_source") or "").strip().lower() == "remail":
+                raise RuntimeError("原 Remail 邮箱订单上下文不存在，已停止重试以避免重新购买邮箱")
+            email, name, birthday = _prepare_registration_args(preferred_email=preferred_email)
+            if saved_context is None:
+                saved_context = _capture_job_email_context(email)
+            db.update_job(job_id, email=email, email_context=saved_context)
             check_stop_requested()
             result = run_registration(email=email, name=name, birthday=birthday)
             registration_result = result if isinstance(result, dict) else None
@@ -634,8 +703,9 @@ def retry_job(job_id: int, workers: int | None = None) -> dict:
             int(job_id),
             job_type="codex_retry" if action == "codex" else "registration",
             email_source=str(source.get("email_source") or "outlook"),
-            email=email if action == "codex" else None,
+            email=email if action == "codex" else str(source.get("email") or "").strip() or None,
             account_id=account_id if action == "codex" else None,
+            email_context=source.get("email_context") if action == "registration" else None,
         )
     except LookupError as exc:
         if reserved_codex:
@@ -656,7 +726,7 @@ def retry_job(job_id: int, workers: int | None = None) -> dict:
             "message": f"已有重试任务 #{job['id']} 在排队或运行中",
             "source_job_id": int(job_id),
             "retry_action": action,
-            "job": job,
+            "job": _public_job(job),
         }
 
     try:
@@ -679,7 +749,12 @@ def retry_job(job_id: int, workers: int | None = None) -> dict:
             completed_at=datetime.now().isoformat(timespec="seconds"),
         )
         logger.exception("[Service] 重试任务 #%s 提交线程池失败", job["id"])
-        return {"ok": False, "error": "重试任务创建成功，但提交执行失败", "status": 500, "job": db.get_job(int(job["id"]))}
+        return {
+            "ok": False,
+            "error": "重试任务创建成功，但提交执行失败",
+            "status": 500,
+            "job": _public_job(db.get_job(int(job["id"]))),
+        }
 
     return {
         "ok": True,
@@ -688,7 +763,7 @@ def retry_job(job_id: int, workers: int | None = None) -> dict:
         "message": f"已创建重试任务 #{job['id']}（{'Codex 补跑' if action == 'codex' else '完整注册'}）",
         "source_job_id": int(job_id),
         "retry_action": action,
-        "job": job,
+        "job": _public_job(job),
     }
 
 

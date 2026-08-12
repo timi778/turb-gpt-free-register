@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://remail.aishop6.com"
 REQUEST_TIMEOUT = 20
+PICKUP_STATUS_TIMEOUT = 15
 REQUEST_MAX_ATTEMPTS = 4
 REQUEST_RETRY_BASE_DELAY = 2.0
 REQUEST_RETRY_MAX_DELAY = 15.0
@@ -240,6 +241,14 @@ def export_account_context(email: str, *, include_secret: bool = True) -> dict |
     return _context_to_dict(account, include_secret=include_secret)
 
 
+def export_task_context(email: str) -> dict | None:
+    """导出注册任务恢复所需上下文；短效与长效订单均支持。"""
+    account = get_account_context(email)
+    if account is None:
+        return None
+    return _context_to_dict(account, include_secret=True)
+
+
 def is_long_lived_email(email: str) -> bool:
     account = get_account_context(email)
     return bool(account and account.is_long_lived)
@@ -327,6 +336,7 @@ def _request(
     api_key_override: str | None = None,
     extra_headers: dict[str, str] | None = None,
     max_attempts: int | None = None,
+    timeout: float | None = None,
 ):
     headers = {"Accept": "application/json"}
     if authenticated:
@@ -345,7 +355,7 @@ def _request(
                 params=params,
                 json=json,
                 headers=headers,
-                timeout=REQUEST_TIMEOUT,
+                timeout=REQUEST_TIMEOUT if timeout is None else max(0.1, float(timeout)),
                 proxies=proxies,
             )
         except requests.RequestException as exc:
@@ -1035,6 +1045,17 @@ def get_account_context(email: str) -> RemailAccount | None:
         return account
 
 
+def restore_account_context(raw: dict | None) -> RemailAccount | None:
+    """把任务中保存的 Remail 订单上下文恢复到当前进程。"""
+    account = _context_from_dict(raw)
+    if account is None:
+        return None
+    with _CONTEXT_LOCK:
+        _CONTEXT_CACHE[_cache_key(account.email)] = account
+        _persist_context(account)
+    return account
+
+
 def refresh_account_context(email: str, *, update_registered_account: bool = True) -> RemailAccount:
     """从订单详情刷新长效邮箱的激活、质保和收件时间。"""
     account = get_account_context(email)
@@ -1264,6 +1285,7 @@ def check_pickup_statuses(emails) -> dict[str, dict]:
                 params={"email": account.email, "token": account.service_token},
                 authenticated=False,
                 max_attempts=1,
+                timeout=PICKUP_STATUS_TIMEOUT,
             )
             if not _pickup_payload_has_items(payload):
                 raise RemailError("Remail 取件响应缺少 items 数组")
@@ -1292,6 +1314,7 @@ def check_pickup_statuses(emails) -> dict[str, dict]:
             },
             authenticated=False,
             max_attempts=1,
+            timeout=PICKUP_STATUS_TIMEOUT,
         )
     except Exception as exc:
         status = _pickup_status_from_error(exc)
