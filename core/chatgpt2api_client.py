@@ -10,6 +10,9 @@ from config import chatgpt2api as _cfg
 
 logger = logging.getLogger(__name__)
 
+_ABNORMAL_ACCOUNT_PAGE_SIZE = 500
+_ABNORMAL_ACCOUNT_MAX_PAGES = 100
+
 
 def _result(*, status: str, ok: bool = False, mode: str | None = None, **extra) -> dict:
     return {"status": status, "ok": ok, "mode": mode, **extra}
@@ -49,6 +52,7 @@ def _request(
     base_url: str | None = None,
     admin_key: str | None = None,
     json_body: dict | None = None,
+    params: dict | None = None,
 ):
     base = _normalize_base_url(
         _cfg.CHATGPT2API_BASE_URL if base_url is None else base_url
@@ -68,6 +72,7 @@ def _request(
             **({"Content-Type": "application/json"} if json_body is not None else {}),
         },
         json=json_body,
+        params=params,
         timeout=timeout,
     )
 
@@ -110,6 +115,116 @@ def test_connection(base_url: str | None = None, admin_key: str | None = None) -
         ok=True,
         http_status=http_status,
         account_count=len(items) if isinstance(items, list) else None,
+    )
+
+
+def list_abnormal_accounts(
+    base_url: str | None = None,
+    admin_key: str | None = None,
+) -> dict:
+    """分页读取 chatgpt2api 后端已投影为异常的账号，不接触任何凭据。"""
+    accounts: list[dict] = []
+    seen_emails: set[str] = set()
+    abnormal_count = 0
+    missing_email_count = 0
+
+    for page in range(1, _ABNORMAL_ACCOUNT_MAX_PAGES + 1):
+        try:
+            response = _request(
+                "GET",
+                "/api/accounts",
+                base_url=base_url,
+                admin_key=admin_key,
+                params={
+                    "status": "abnormal",
+                    "page": page,
+                    "page_size": _ABNORMAL_ACCOUNT_PAGE_SIZE,
+                },
+            )
+        except (requests.RequestException, ValueError) as exc:
+            return _result(
+                status="failed",
+                error=f"查询异常账号失败: {type(exc).__name__}: {exc}",
+            )
+
+        http_status = int(getattr(response, "status_code", 0) or 0)
+        if http_status in (401, 403):
+            return _result(
+                status="failed",
+                http_status=http_status,
+                error=f"管理鉴权失败 HTTP {http_status}",
+            )
+        if not 200 <= http_status < 300:
+            return _result(
+                status="failed",
+                http_status=http_status,
+                error=f"查询异常账号失败 HTTP {http_status}: {_error_preview(response)}",
+            )
+
+        payload = _response_json(response)
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            return _result(
+                status="failed",
+                http_status=http_status,
+                error="chatgpt2api 异常账号响应缺少 items 数组",
+            )
+
+        items = [item for item in payload["items"] if isinstance(item, dict)]
+        total_present = payload.get("total") not in (None, "")
+        try:
+            reported_total = int(payload.get("total") or 0)
+        except (TypeError, ValueError):
+            reported_total = 0
+            total_present = False
+        if reported_total <= 0 and items:
+            total_present = False
+        abnormal_count = max(abnormal_count, reported_total, len(accounts) + len(items))
+
+        unexpected = [
+            item for item in items
+            if str(item.get("status_category") or "").strip().lower() != "abnormal"
+        ]
+        if unexpected:
+            return _result(
+                status="failed",
+                http_status=http_status,
+                error="chatgpt2api 异常账号筛选响应包含非异常账号",
+            )
+
+        for item in items:
+            email = str(item.get("email") or "").strip()
+            if not email or "@" not in email:
+                missing_email_count += 1
+                continue
+            normalized_email = email.casefold()
+            if normalized_email in seen_emails:
+                continue
+            seen_emails.add(normalized_email)
+            accounts.append({
+                "id": str(item.get("id") or "").strip(),
+                "email": email,
+                "status_label": str(item.get("status_label") or "异常").strip(),
+                "status_reason_code": str(item.get("status_reason_code") or "").strip(),
+                "status_reason": str(item.get("status_reason") or "").strip(),
+            })
+
+        if total_present and page * _ABNORMAL_ACCOUNT_PAGE_SIZE >= reported_total:
+            break
+        if len(items) < _ABNORMAL_ACCOUNT_PAGE_SIZE:
+            break
+    else:
+        return _result(
+            status="failed",
+            error=f"chatgpt2api 异常账号超过单次同步上限 {_ABNORMAL_ACCOUNT_PAGE_SIZE * _ABNORMAL_ACCOUNT_MAX_PAGES}",
+        )
+
+    return _result(
+        status="success",
+        ok=True,
+        abnormal_count=max(abnormal_count, len(accounts) + missing_email_count),
+        email_count=len(accounts),
+        missing_email_count=missing_email_count,
+        accounts=accounts,
     )
 
 

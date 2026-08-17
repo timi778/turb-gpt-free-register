@@ -722,6 +722,138 @@ class RemailReloginWebUiTests(unittest.TestCase):
         claim.assert_called_once_with(7, trigger="manual_bulk")
         start.assert_called_once_with([{"id": 7, "email": "api-long@outlook.test"}], 16)
 
+    def test_abnormal_relogin_preview_maps_local_eligibility(self):
+        client = self._client()
+        remote = {
+            "ok": True,
+            "abnormal_count": 4,
+            "email_count": 4,
+            "missing_email_count": 0,
+            "accounts": [
+                {"id": "r1", "email": "ready@example.com", "status_label": "异常", "status_reason_code": "auth_invalid", "status_reason": "登录态失效"},
+                {"id": "r2", "email": "missing@example.com", "status_label": "异常", "status_reason": "账号不可用"},
+                {"id": "r3", "email": "short@example.com", "status_label": "异常", "status_reason": "账号不可用"},
+                {"id": "r4", "email": "busy@example.com", "status_label": "异常", "status_reason": "账号不可用"},
+            ],
+        }
+        local = [
+            {"id": 1, "email": "READY@example.com", "remail_long_lived": True, "remail_relogin_status": "failed"},
+            {"id": 3, "email": "short@example.com", "remail_long_lived": False, "remail_relogin_status": "never"},
+            {"id": 4, "email": "busy@example.com", "remail_long_lived": True, "remail_relogin_status": "running"},
+        ]
+        with patch("core.chatgpt2api_client.list_abnormal_accounts", return_value=remote), patch(
+            "webui.app.db.count_accounts", return_value=len(local)
+        ), patch("webui.app.db.list_accounts", return_value=local):
+            response = client.get("/api/accounts/remail-relogin-chatgpt2api-abnormal")
+
+        payload = response.get_json()
+        by_email = {item["email"]: item for item in payload["items"]}
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(by_email["ready@example.com"]["match_status"], "ready")
+        self.assertTrue(by_email["ready@example.com"]["can_relogin"])
+        self.assertEqual(by_email["missing@example.com"]["match_status"], "not_registered")
+        self.assertEqual(by_email["short@example.com"]["match_status"], "not_long_lived")
+        self.assertEqual(by_email["busy@example.com"]["match_status"], "busy")
+        self.assertEqual(payload["matched_local_count"], 3)
+        self.assertEqual(payload["eligible_count"], 1)
+        self.assertEqual(payload["unmatched_local_count"], 1)
+
+    def test_abnormal_relogin_bulk_skips_unmatched_and_queues_valid_accounts(self):
+        client = self._client()
+        remote = {
+            "ok": True,
+            "abnormal_count": 3,
+            "email_count": 3,
+            "missing_email_count": 0,
+            "accounts": [
+                {"id": "r1", "email": "one@example.com", "status_label": "异常", "status_reason": "登录态失效"},
+                {"id": "r2", "email": "missing@example.com", "status_label": "异常", "status_reason": "账号不可用"},
+                {"id": "r3", "email": "two@example.com", "status_label": "异常", "status_reason": "账号不可用"},
+            ],
+        }
+        local = [
+            {"id": 1, "email": "one@example.com", "remail_long_lived": True, "remail_relogin_status": "never"},
+            {"id": 2, "email": "two@example.com", "remail_long_lived": True, "remail_relogin_status": "failed"},
+        ]
+        local_by_id = {item["id"]: item for item in local}
+        with patch("core.chatgpt2api_client.list_abnormal_accounts", return_value=remote), patch(
+            "webui.app.db.count_accounts", return_value=len(local)
+        ), patch("webui.app.db.list_accounts", return_value=local), patch(
+            "webui.app.db.get_account", side_effect=lambda acc_id: local_by_id.get(acc_id)
+        ), patch("webui.app.db.claim_account_remail_relogin", return_value=True) as claim, patch.object(
+            remail_relogin_service,
+            "start_batch",
+            return_value={"batch_id": "batch-abnormal", "workers": 1, "count": 2},
+        ) as start:
+            response = client.post(
+                "/api/accounts/remail-relogin-chatgpt2api-abnormal",
+                json={"workers": 1},
+            )
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["started_count"], 2)
+        self.assertEqual(payload["skipped_count"], 1)
+        self.assertEqual(payload["skipped"][0]["email"], "missing@example.com")
+        self.assertIn("本地没有注册记录", payload["skipped"][0]["reason"])
+        self.assertEqual(claim.call_count, 2)
+        start.assert_called_once_with([
+            {"id": 1, "email": "one@example.com"},
+            {"id": 2, "email": "two@example.com"},
+        ], 1)
+
+    def test_abnormal_relogin_can_filter_one_email(self):
+        client = self._client()
+        remote = {
+            "ok": True,
+            "abnormal_count": 2,
+            "email_count": 2,
+            "missing_email_count": 0,
+            "accounts": [
+                {"id": "r1", "email": "one@example.com", "status_label": "异常", "status_reason": "登录态失效"},
+                {"id": "r2", "email": "two@example.com", "status_label": "异常", "status_reason": "账号不可用"},
+            ],
+        }
+        local = [
+            {"id": 1, "email": "one@example.com", "remail_long_lived": True, "remail_relogin_status": "never"},
+            {"id": 2, "email": "two@example.com", "remail_long_lived": True, "remail_relogin_status": "never"},
+        ]
+        local_by_id = {item["id"]: item for item in local}
+        with patch("core.chatgpt2api_client.list_abnormal_accounts", return_value=remote), patch(
+            "webui.app.db.count_accounts", return_value=2
+        ), patch("webui.app.db.list_accounts", return_value=local), patch(
+            "webui.app.db.get_account", side_effect=lambda acc_id: local_by_id.get(acc_id)
+        ), patch("webui.app.db.claim_account_remail_relogin", return_value=True), patch.object(
+            remail_relogin_service,
+            "start_batch",
+            return_value={"batch_id": "batch-one-abnormal", "workers": 1, "count": 1},
+        ) as start:
+            response = client.post(
+                "/api/accounts/remail-relogin-chatgpt2api-abnormal",
+                json={"emails": ["TWO@example.com"], "workers": 1},
+            )
+
+        self.assertEqual(response.status_code, 202)
+        start.assert_called_once_with([{"id": 2, "email": "two@example.com"}], 1)
+
+    def test_abnormal_batch_continues_after_one_worker_raises(self):
+        calls = []
+
+        def run_one(item, *_args):
+            calls.append(item["id"])
+            if item["id"] == 1:
+                raise RuntimeError("first failed")
+            return {"ok": True, "id": item["id"]}
+
+        with patch.object(remail_relogin_service, "_run_one", side_effect=run_one):
+            remail_relogin_service._run_batch(
+                [{"id": 1, "email": "one@example.com"}, {"id": 2, "email": "two@example.com"}],
+                1,
+                "batch-continue",
+            )
+
+        self.assertEqual(calls, [1, 2])
+
     def test_accounts_api_does_not_return_remail_service_token(self):
         client = self._client()
         row = {
@@ -906,6 +1038,13 @@ class RemailReloginWebUiTests(unittest.TestCase):
         self.assertNotIn("以 Remail 当前可取件状态为准", page)
         self.assertNotIn("平台时间", page)
         self.assertIn("不会按固定 24 小时限制", page)
+        self.assertIn('data-tab="abnormal-relogin"', page)
+        self.assertIn('id="tab-abnormal-relogin"', page)
+        self.assertIn("btnReloginAllAbnormal", page)
+        self.assertIn("btnRefreshAbnormalRelogin", page)
+        self.assertIn("data-abnormal-relogin-email", page)
+        self.assertLess(page.index('data-tab="accounts"'), page.index('data-tab="abnormal-relogin"'))
+        self.assertLess(page.index('data-tab="abnormal-relogin"'), page.index('data-tab="codex"'))
 
 
 if __name__ == "__main__":

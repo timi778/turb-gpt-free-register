@@ -91,6 +91,84 @@ class Chatgpt2ApiClientTests(unittest.TestCase):
         self.assertEqual(result["mode"], "rt")
         request.assert_called_once()
 
+    @patch("core.chatgpt2api_client._ABNORMAL_ACCOUNT_PAGE_SIZE", 2)
+    @patch("core.chatgpt2api_client.requests.request")
+    def test_list_abnormal_accounts_paginates_and_projects_safe_fields(self, request):
+        from core.chatgpt2api_client import list_abnormal_accounts
+
+        request.side_effect = [
+            _http_response(payload={"total": 3, "items": [
+                {
+                    "id": 11,
+                    "email": "One@Example.com",
+                    "status_category": "abnormal",
+                    "status_label": "异常",
+                    "status_reason_code": "auth_invalid",
+                    "status_reason": "登录态失效",
+                    "refresh_token": "must-not-leak",
+                },
+                {
+                    "id": 12,
+                    "email": "two@example.com",
+                    "status_category": "abnormal",
+                    "status_reason": "请求被拒绝",
+                },
+            ]}),
+            _http_response(payload={"total": 3, "items": [{
+                "id": 13,
+                "email": "three@example.com",
+                "status_category": "abnormal",
+                "status_reason": "账号不可用",
+            }]}),
+        ]
+
+        result = list_abnormal_accounts("https://pool.example.com/", "admin-key")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["abnormal_count"], 3)
+        self.assertEqual(result["email_count"], 3)
+        self.assertNotIn("refresh_token", result["accounts"][0])
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args_list[0].kwargs["params"], {
+            "status": "abnormal",
+            "page": 1,
+            "page_size": 2,
+        })
+        self.assertEqual(request.call_args_list[1].kwargs["params"]["page"], 2)
+        self.assertEqual(
+            request.call_args_list[0].kwargs["headers"]["Authorization"],
+            "Bearer admin-key",
+        )
+
+    @patch("core.chatgpt2api_client.requests.request")
+    def test_list_abnormal_accounts_rejects_non_abnormal_projection(self, request):
+        from core.chatgpt2api_client import list_abnormal_accounts
+
+        request.return_value = _http_response(payload={"total": 1, "items": [{
+            "id": 21,
+            "email": "normal@example.com",
+            "status_category": "normal",
+        }]})
+
+        result = list_abnormal_accounts("https://pool.example.com", "admin-key")
+
+        self.assertFalse(result["ok"])
+        self.assertIn("非异常账号", result["error"])
+
+    @patch("core.chatgpt2api_client.requests.request")
+    def test_list_abnormal_accounts_reports_auth_and_malformed_response(self, request):
+        from core.chatgpt2api_client import list_abnormal_accounts
+
+        request.return_value = _http_response(status=401, text="unauthorized")
+        auth_result = list_abnormal_accounts("https://pool.example.com", "bad-key")
+        self.assertFalse(auth_result["ok"])
+        self.assertEqual(auth_result["http_status"], 401)
+
+        request.return_value = _http_response(payload={"data": []})
+        malformed_result = list_abnormal_accounts("https://pool.example.com", "admin-key")
+        self.assertFalse(malformed_result["ok"])
+        self.assertIn("items", malformed_result["error"])
+
 
 class Chatgpt2ApiConfigAndWebUiTests(unittest.TestCase):
     def setUp(self):

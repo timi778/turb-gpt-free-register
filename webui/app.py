@@ -368,22 +368,9 @@ def create_app(auth_code: str | None = None) -> Flask:
         }), 202
 
 
-    @app.post("/api/accounts/remail-relogin-bulk")
-    def api_accounts_remail_relogin_bulk():
-        """批量使用已持久化的 Remail 长效邮箱 OTP 补登并更新 AT/RT。"""
+    def _queue_remail_relogin_accounts(ids: list, workers: int, *, trigger: str) -> tuple[dict, int]:
+        """占用并启动一批 Remail 长效账号，供手工选择和远端异常匹配共用。"""
         from core import remail_relogin_service
-
-        data = request.get_json(silent=True) or {}
-        ids = data.get("account_ids") or data.get("ids") or []
-        workers = data.get("workers", 1)
-        if not isinstance(ids, list) or not ids:
-            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
-        if len(ids) > 500:
-            return jsonify({"ok": False, "error": "单次最多选择 500 个账号"}), 400
-        try:
-            workers = max(1, min(16, int(workers)))
-        except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "workers 必须是数字"}), 400
 
         selected = []
         skipped = []
@@ -405,18 +392,20 @@ def create_app(auth_code: str | None = None) -> Flask:
             if not account.get("remail_long_lived"):
                 skipped.append({"id": acc_id, "email": email, "reason": "不是已持久化的 Remail 长效邮箱账号"})
                 continue
-            if not db.claim_account_remail_relogin(acc_id, trigger="manual_bulk"):
+            if not db.claim_account_remail_relogin(acc_id, trigger=trigger):
                 skipped.append({"id": acc_id, "email": email, "reason": "补登任务正在执行"})
                 continue
             selected.append({"id": acc_id, "email": email})
 
         if not selected:
-            return jsonify({
+            return {
                 "ok": False,
                 "error": "没有可补登的 Remail 长效邮箱账号",
                 "skipped": skipped,
                 "skipped_count": len(skipped),
-            }), 409
+                "started": [],
+                "started_count": 0,
+            }, 409
         try:
             batch = remail_relogin_service.start_batch(selected, workers)
         except Exception as exc:
@@ -427,12 +416,12 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "message": "补登任务启动失败",
                     "driver": "",
                 })
-            return jsonify({
+            return {
                 "ok": False,
                 "error": f"补登任务启动失败: {type(exc).__name__}: {exc}",
                 "skipped": skipped,
-            }), 500
-        return jsonify({
+            }, 500
+        return {
             "ok": True,
             "message": f"已开始补登 {len(selected)} 个 Remail 长效邮箱账号，并发 {workers}",
             "started": selected,
@@ -440,7 +429,194 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped": skipped,
             "skipped_count": len(skipped),
             **batch,
-        }), 202
+        }, 202
+
+
+    @app.post("/api/accounts/remail-relogin-bulk")
+    def api_accounts_remail_relogin_bulk():
+        """批量使用已持久化的 Remail 长效邮箱 OTP 补登并更新 AT/RT。"""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        workers = data.get("workers", 1)
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多选择 500 个账号"}), 400
+        try:
+            workers = max(1, min(16, int(workers)))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "workers 必须是数字"}), 400
+
+        payload, status = _queue_remail_relogin_accounts(
+            ids,
+            workers,
+            trigger="manual_bulk",
+        )
+        return jsonify(payload), status
+
+
+    def _chatgpt2api_abnormal_relogin_preview() -> tuple[dict, int]:
+        """构建 2API 异常邮箱与本地账号的只读匹配投影。"""
+        from core.chatgpt2api_client import list_abnormal_accounts
+
+        remote = list_abnormal_accounts()
+        if not remote.get("ok"):
+            return {
+                "ok": False,
+                "error": str(remote.get("error") or "查询 chatgpt2api 异常账号失败"),
+                "http_status": remote.get("http_status"),
+            }, 502
+
+        remote_accounts = [
+            item for item in remote.get("accounts", [])
+            if isinstance(item, dict) and str(item.get("email") or "").strip()
+        ]
+        local_limit = max(1, int(db.count_accounts() or 0))
+        local_accounts = db.list_accounts(limit=local_limit)
+        local_by_email = {
+            str(account.get("email") or "").strip().casefold(): account
+            for account in local_accounts
+            if str(account.get("email") or "").strip()
+        }
+        status_labels = {
+            "never": "从未补登",
+            "queued": "排队中",
+            "running": "补登中",
+            "success": "最近成功",
+            "partial": "AT 已更新",
+            "failed": "最近失败",
+            "stopped": "已停止",
+        }
+        items = []
+        for remote_account in remote_accounts:
+            email = str(remote_account.get("email") or "").strip()
+            local = local_by_email.get(email.casefold())
+            relogin_status = str((local or {}).get("remail_relogin_status") or "never").strip().lower()
+            remail_long_lived = bool((local or {}).get("remail_long_lived"))
+            if local is None:
+                match_status, match_label, match_tone = "not_registered", "本地无注册记录", "muted"
+            elif not remail_long_lived:
+                match_status, match_label, match_tone = "not_long_lived", "不是 Remail 长效账号", "warning"
+            elif relogin_status in {"queued", "running"}:
+                match_status, match_label, match_tone = "busy", "补登任务执行中", "running"
+            else:
+                match_status, match_label, match_tone = "ready", "可补登", "success"
+            items.append({
+                "remote_account_id": str(remote_account.get("id") or ""),
+                "email": email,
+                "status_label": str(remote_account.get("status_label") or "异常"),
+                "status_reason_code": str(remote_account.get("status_reason_code") or ""),
+                "status_reason": str(remote_account.get("status_reason") or ""),
+                "local_account_id": local.get("id") if local else None,
+                "local_exists": local is not None,
+                "remail_long_lived": remail_long_lived,
+                "relogin_status": relogin_status,
+                "relogin_label": status_labels.get(relogin_status, relogin_status or "从未补登"),
+                "relogin_message": str(
+                    (local or {}).get("remail_relogin_error")
+                    or (local or {}).get("remail_relogin_message")
+                    or ""
+                ),
+                "match_status": match_status,
+                "match_label": match_label,
+                "match_tone": match_tone,
+                "can_relogin": match_status == "ready",
+            })
+
+        matched_count = sum(1 for item in items if item["local_exists"])
+        return {
+            "ok": True,
+            "items": items,
+            "remote_abnormal_count": int(remote.get("abnormal_count") or 0),
+            "remote_email_count": len(items),
+            "missing_remote_email_count": int(remote.get("missing_email_count") or 0),
+            "matched_local_count": matched_count,
+            "eligible_count": sum(1 for item in items if item["can_relogin"]),
+            "unmatched_local_count": len(items) - matched_count,
+        }, 200
+
+
+    @app.get("/api/accounts/remail-relogin-chatgpt2api-abnormal")
+    def api_accounts_remail_relogin_chatgpt2api_abnormal_preview():
+        payload, status = _chatgpt2api_abnormal_relogin_preview()
+        return jsonify(payload), status
+
+
+    @app.post("/api/accounts/remail-relogin-chatgpt2api-abnormal")
+    def api_accounts_remail_relogin_chatgpt2api_abnormal():
+        """按邮箱匹配 2API 异常账号，跳过无记录项并启动连续补登批次。"""
+        data = request.get_json(silent=True) or {}
+        try:
+            workers = max(1, min(16, int(data.get("workers", 1))))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "workers 必须是数字"}), 400
+        requested_emails = data.get("emails")
+        if requested_emails is not None and not isinstance(requested_emails, list):
+            return jsonify({"ok": False, "error": "emails 必须是数组"}), 400
+
+        preview, preview_status = _chatgpt2api_abnormal_relogin_preview()
+        if preview_status != 200:
+            return jsonify(preview), preview_status
+        items = preview["items"]
+        requested = None
+        if requested_emails is not None:
+            requested = {
+                str(email or "").strip().casefold()
+                for email in requested_emails
+                if str(email or "").strip()
+            }
+            items = [item for item in items if item["email"].casefold() in requested]
+
+        skipped = []
+        ids = []
+        for item in items:
+            if not item["local_exists"]:
+                skipped.append({"email": item["email"], "reason": "本地没有注册记录"})
+            elif item["local_account_id"] is not None:
+                ids.append(item["local_account_id"])
+        if requested is not None:
+            remote_emails = {item["email"].casefold() for item in preview["items"]}
+            skipped.extend(
+                {"email": email, "reason": "不在 2API 异常邮箱列表中"}
+                for email in sorted(requested - remote_emails)
+            )
+
+        if ids:
+            payload, status = _queue_remail_relogin_accounts(
+                ids,
+                workers,
+                trigger="chatgpt2api_abnormal",
+            )
+            skipped.extend(payload.get("skipped") or [])
+            payload["skipped"] = skipped
+            payload["skipped_count"] = len(skipped)
+        else:
+            payload, status = {
+                "ok": True,
+                "message": "没有匹配到可补登的本地 Remail 长效账号",
+                "started": [],
+                "started_count": 0,
+                "skipped": skipped,
+                "skipped_count": len(skipped),
+            }, 200
+
+        if status == 409:
+            payload["ok"] = True
+            payload["message"] = "没有新的 Remail 长效账号可补登"
+            payload.pop("error", None)
+            status = 200
+        payload.update({
+            key: preview[key]
+            for key in (
+                "remote_abnormal_count",
+                "remote_email_count",
+                "missing_remote_email_count",
+                "matched_local_count",
+                "eligible_count",
+                "unmatched_local_count",
+            )
+        })
+        return jsonify(payload), status
 
 
     @app.post("/api/accounts/<int:acc_id>/remail-relogin")

@@ -47,17 +47,18 @@
     .stat span { display: block; color: #b8c7d9; font-size: 11px; }
     .stat strong { display: block; margin-top: 3px; font-size: 18px; }
     nav {
-      width: 100%; max-width: 100%; overflow: hidden;
+      width: 100%; max-width: 100%; overflow-x: auto;
       padding: 0; background: #1b2538;
       border-bottom: 1px solid rgba(255,255,255,.08);
     }
     .nav-inner {
-      width: calc(100% - var(--page-gutter) * 2); max-width: var(--page-max-width); margin: 0 auto;
+      width: max-content; min-width: 100%; max-width: none; margin: 0 auto;
       display: flex; justify-content: center; align-items: center; gap: 4px;
     }
     nav button {
       border: none; background: transparent; color: #b8c7d9; font: inherit; font-weight: 700;
-      padding: 12px 18px; cursor: pointer; border-bottom: 3px solid transparent;
+      flex: 0 0 auto; padding: 12px 18px; cursor: pointer; border-bottom: 3px solid transparent;
+      white-space: nowrap;
     }
     nav button:hover { color: #fff; }
     nav button.active { color: #fff; border-bottom-color: var(--blue); }
@@ -141,6 +142,11 @@
     .accounts-table .col-note { width: 180px; }
     .accounts-table .col-remail { width: 334px; }
     .accounts-table .col-actions { width: 460px; }
+    .abnormal-relogin-table { min-width: 980px; }
+    .abnormal-relogin-table .col-email { width: 250px; }
+    .abnormal-relogin-table .col-error { width: 360px; }
+    .abnormal-relogin-table .col-status { width: 180px; }
+    .abnormal-relogin-table .col-actions { width: 116px; }
     .accounts-table td:nth-child(10), .accounts-table th:nth-child(10) { overflow: visible; text-overflow: clip; }
     .token-countdown { min-width: 126px; font-variant-numeric: tabular-nums; }
     .token-refresh-status { white-space: nowrap; }
@@ -368,6 +374,10 @@
       background: #fff; color: var(--blue); text-decoration: none; font-size: 12px; font-weight: 800;
     }
     .roxy-invite-link:hover { background: #e0ebff; }
+    @media (max-width: 720px) {
+      .nav-inner { justify-content: flex-start; padding: 0 8px; }
+      nav button { padding-left: 14px; padding-right: 14px; }
+    }
   </style>
 </head>
 <body>
@@ -395,6 +405,7 @@
   <div class="nav-inner">
     <button data-tab="register" class="active">注册</button>
     <button data-tab="accounts">账号</button>
+    <button data-tab="abnormal-relogin">异常补登</button>
     <button data-tab="codex">Codex 授权</button>
     <button data-tab="outlook">邮箱池</button>
     <button data-tab="config">配置</button>
@@ -530,6 +541,37 @@
         </h3>
         <div class="log" id="remailReloginLogContent">加载中…</div>
       </div>
+    </section>
+  </div>
+
+  <!-- ============ 异常补登 ============ -->
+  <div id="tab-abnormal-relogin" class="hidden">
+    <section class="card">
+      <div class="toolbar">
+        <div>
+          <h2>2API 异常账号补登</h2>
+          <p class="muted" id="abnormalReloginSummary" style="font-size:12px;margin-top:4px;">正在读取异常邮箱并匹配本地注册记录…</p>
+        </div>
+        <div class="buttons">
+          <label class="inline-num" title="按异常列表连续补登时使用的并发线程数">补登线程
+            <input id="abnormalReloginWorkers" type="number" min="1" max="16" value="1">
+          </label>
+          <button class="btn primary" id="btnReloginAllAbnormal" disabled title="补登全部可用异常账号；单个失败后会自动继续下一个">补登全部可用</button>
+          <button type="button" class="btn" id="btnRefreshAbnormalRelogin" title="刷新异常账号" aria-label="刷新异常账号">
+            <svg viewBox="0 0 24 24" aria-hidden="true" style="width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2;"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+          </button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="abnormal-relogin-table">
+          <colgroup><col class="col-email"><col class="col-error"><col class="col-status"><col class="col-status"><col class="col-actions"></colgroup>
+          <thead><tr>
+            <th>2API 异常邮箱</th><th>异常原因</th><th>本地匹配</th><th>Remail 状态</th><th>操作</th>
+          </tr></thead>
+          <tbody id="abnormalReloginBody"><tr><td colspan="5" class="muted center">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="pager-bar" id="pager-abnormal-relogin"></div>
     </section>
   </div>
 
@@ -674,6 +716,8 @@ const $$ = (s) => Array.from(document.querySelectorAll(s));
 let copySeq = 0;
 const copyStore = new Map();
 let ACCOUNTS = [], OUTLOOK = [], CONFIG = [];
+let ABNORMAL_RELOGIN_ITEMS = [];
+let ABNORMAL_RELOGIN_SUMMARY = {};
 let ACCOUNT_GROUPS = [];
 let ACTIVE_ACCOUNT_GROUP_ID = null;
 const ACCOUNT_SELECTED = new Set();
@@ -687,6 +731,7 @@ let activeLogJob = null, logTimer = null, jobsTimer = null;
 const PAGERS = {
   jobs:     { page: 1, size: 20 },
   accounts: { page: 1, size: 20 },
+  'abnormal-relogin': { page: 1, size: 20 },
   outlook:  { page: 1, size: 20 },
   codex:    { page: 1, size: 20 },
 };
@@ -711,12 +756,12 @@ function _renderPager(id, total) {
 
 function pagerGo(id, dir) {
   PAGERS[id].page = Math.max(1, PAGERS[id].page + dir);
-  ({ jobs: renderJobs, accounts: renderAccounts, outlook: renderOutlook, codex: renderCodex })[id]?.();
+  ({ jobs: renderJobs, accounts: renderAccounts, 'abnormal-relogin': renderAbnormalRelogin, outlook: renderOutlook, codex: renderCodex })[id]?.();
 }
 function pagerSetSize(id, val) {
   PAGERS[id].size = parseInt(val, 10) || 20;
   PAGERS[id].page = 1;
-  ({ jobs: renderJobs, accounts: renderAccounts, outlook: renderOutlook, codex: renderCodex })[id]?.();
+  ({ jobs: renderJobs, accounts: renderAccounts, 'abnormal-relogin': renderAbnormalRelogin, outlook: renderOutlook, codex: renderCodex })[id]?.();
 }
 
 // ---------- 工具 ----------
@@ -771,12 +816,13 @@ async function api(url, opts) {
 
 // ---------- Tab 切换 ----------
 function activateTab(tab, persist=true) {
-  const allowed = ['register','accounts','codex','outlook','config'];
+  const allowed = ['register','accounts','abnormal-relogin','codex','outlook','config'];
   if (!allowed.includes(tab)) tab = 'register';
   $$('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
   allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
   if (tab === 'accounts') loadAccounts({refreshPickup: true});
+  if (tab === 'abnormal-relogin') loadAbnormalRelogin();
   if (tab === 'codex') loadCodex();
   if (tab === 'outlook') loadOutlook();
   if (tab === 'config') loadConfig();
@@ -2022,6 +2068,154 @@ function resumeRemailReloginLogIfStarted(started) {
 }
 
 $('#btnCloseRemailReloginLog').addEventListener('click', closeRemailReloginLogModal);
+
+// ---------- 2API 异常账号补登 ----------
+let abnormalReloginLoading = false;
+let abnormalReloginPollTimer = null;
+
+function renderAbnormalRelogin() {
+  const p = PAGERS['abnormal-relogin'];
+  const total = ABNORMAL_RELOGIN_ITEMS.length;
+  const rows = ABNORMAL_RELOGIN_ITEMS.slice((p.page - 1) * p.size, p.page * p.size);
+  const body = $('#abnormalReloginBody');
+  const toneClass = {
+    success: 'status-success',
+    running: 'status-running',
+    warning: 'status-partial',
+    muted: 'status-used',
+  };
+  const reloginClass = {
+    queued: 'status-running',
+    running: 'status-running',
+    success: 'status-success',
+    partial: 'status-partial',
+    failed: 'status-failed',
+    stopped: 'status-used',
+    never: 'status-used',
+  };
+  body.innerHTML = rows.length ? rows.map(item => {
+    const reason = item.status_reason || item.status_label || '2API 标记为异常';
+    const reasonCode = item.status_reason_code
+      ? `<div class="sub-cell mono">${esc(item.status_reason_code)}</div>`
+      : '';
+    const localId = item.local_account_id == null ? '' : `<div class="sub-cell">本地 #${esc(item.local_account_id)}</div>`;
+    const reloginStatus = String(item.relogin_status || 'never').toLowerCase();
+    const reloginMessage = item.relogin_message || '';
+    return `<tr>
+      <td><div class="main-cell">${esc(item.email)}</div><div class="sub-cell">2API #${esc(item.remote_account_id || '-')}</div></td>
+      <td class="wrap"><div>${esc(reason)}</div>${reasonCode}</td>
+      <td><span class="pill ${toneClass[item.match_tone] || 'status-used'}">${esc(item.match_label)}</span>${localId}</td>
+      <td><span class="pill ${reloginClass[reloginStatus] || 'status-used'}" title="${esc(reloginMessage)}">${esc(item.relogin_label || '-')}</span></td>
+      <td><div class="actions"><button class="good" data-abnormal-relogin-email="${esc(item.email)}"${item.can_relogin ? '' : ' disabled'} title="${esc(item.can_relogin ? '补登该异常账号' : item.match_label)}">补登</button></div></td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="5" class="muted center">没有查到 2API 异常邮箱</td></tr>';
+  _renderPager('abnormal-relogin', total);
+  const eligible = Number(ABNORMAL_RELOGIN_SUMMARY.eligible_count || 0);
+  $('#abnormalReloginSummary').textContent =
+    `2API 异常邮箱 ${Number(ABNORMAL_RELOGIN_SUMMARY.remote_email_count || 0)} 个，` +
+    `本地匹配 ${Number(ABNORMAL_RELOGIN_SUMMARY.matched_local_count || 0)} 个，` +
+    `可补登 ${eligible} 个，本地无记录 ${Number(ABNORMAL_RELOGIN_SUMMARY.unmatched_local_count || 0)} 个`;
+  $('#btnReloginAllAbnormal').disabled = abnormalReloginLoading || eligible === 0;
+}
+
+async function loadAbnormalRelogin({silent = false} = {}) {
+  if (abnormalReloginLoading) return;
+  abnormalReloginLoading = true;
+  const refreshBtn = $('#btnRefreshAbnormalRelogin');
+  const bulkBtn = $('#btnReloginAllAbnormal');
+  refreshBtn.disabled = true;
+  bulkBtn.disabled = true;
+  if (!silent && !ABNORMAL_RELOGIN_ITEMS.length) {
+    $('#abnormalReloginBody').innerHTML = '<tr><td colspan="5" class="muted center">正在读取 2API 异常邮箱…</td></tr>';
+  }
+  try {
+    const result = await api('/api/accounts/remail-relogin-chatgpt2api-abnormal');
+    ABNORMAL_RELOGIN_ITEMS = result.items || [];
+    ABNORMAL_RELOGIN_SUMMARY = result;
+    renderAbnormalRelogin();
+  } catch (err) {
+    $('#abnormalReloginSummary').textContent = `读取失败：${err.message}`;
+    if (!ABNORMAL_RELOGIN_ITEMS.length) {
+      $('#abnormalReloginBody').innerHTML = `<tr><td colspan="5" class="center" style="color:var(--red);">${esc(err.message)}</td></tr>`;
+      _renderPager('abnormal-relogin', 0);
+    }
+  } finally {
+    abnormalReloginLoading = false;
+    refreshBtn.disabled = false;
+    bulkBtn.disabled = !ABNORMAL_RELOGIN_ITEMS.some(item => item.can_relogin);
+  }
+}
+
+function scheduleAbnormalReloginPoll(ids) {
+  const targetIds = new Set((ids || []).map(Number).filter(Number.isFinite));
+  if (!targetIds.size) return;
+  clearInterval(abnormalReloginPollTimer);
+  let ticks = 0;
+  const poll = async () => {
+    ticks += 1;
+    await loadAbnormalRelogin({silent: true});
+    const active = ABNORMAL_RELOGIN_ITEMS.some(item =>
+      targetIds.has(Number(item.local_account_id)) &&
+      ['queued', 'running'].includes(String(item.relogin_status || '').toLowerCase())
+    );
+    if (!active || ticks >= 450) {
+      clearInterval(abnormalReloginPollTimer);
+      abnormalReloginPollTimer = null;
+    }
+  };
+  poll();
+  abnormalReloginPollTimer = setInterval(poll, 4000);
+}
+
+async function submitAbnormalRelogin(emails, btn) {
+  const workersEl = $('#abnormalReloginWorkers');
+  const workers = Math.max(1, Math.min(16, Number(workersEl?.value || 1)));
+  if (workersEl) workersEl.value = workers;
+  btn.disabled = true;
+  try {
+    const result = await api('/api/accounts/remail-relogin-chatgpt2api-abnormal', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({emails, workers}),
+    });
+    const skipped = Number(result.skipped_count || 0);
+    showToast(
+      result.started_count
+        ? `已开始 ${result.started_count} 个${skipped ? `，跳过 ${skipped} 个` : ''}`
+        : (result.message || `没有启动补登${skipped ? `，跳过 ${skipped} 个` : ''}`)
+    );
+    scheduleAbnormalReloginPoll((result.started || []).map(item => item.id));
+    await loadAbnormalRelogin({silent: true});
+  } catch (err) {
+    showToast('异常账号补登失败: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function reloginAbnormalEmail(email, btn) {
+  const item = ABNORMAL_RELOGIN_ITEMS.find(row => String(row.email || '').toLowerCase() === String(email || '').toLowerCase());
+  if (!item?.can_relogin) { showToast(item?.match_label || '该异常邮箱当前不可补登'); return; }
+  if (!confirm(`确定补登这个异常账号吗？\n\n${email}`)) return;
+  await submitAbnormalRelogin([email], btn);
+}
+
+async function reloginAllAbnormal() {
+  const emails = ABNORMAL_RELOGIN_ITEMS.filter(item => item.can_relogin).map(item => item.email);
+  if (!emails.length) { showToast('当前没有可补登的异常账号'); return; }
+  const workers = Math.max(1, Math.min(16, Number($('#abnormalReloginWorkers')?.value || 1)));
+  if (!confirm(
+    `确定补登全部 ${emails.length} 个可用异常账号吗？\n\n并发线程数：${workers}\n单个账号失败不会中断批次，会自动继续下一个。`
+  )) return;
+  await submitAbnormalRelogin(emails, $('#btnReloginAllAbnormal'));
+}
+
+$('#btnRefreshAbnormalRelogin').addEventListener('click', () => loadAbnormalRelogin());
+$('#btnReloginAllAbnormal').addEventListener('click', reloginAllAbnormal);
+$('#abnormalReloginBody').addEventListener('click', async (event) => {
+  const btn = event.target.closest('[data-abnormal-relogin-email]');
+  if (btn) await reloginAbnormalEmail(btn.dataset.abnormalReloginEmail, btn);
+});
 
 // ---------- Remail 长效邮箱补登 ----------
 let remailReloginPollTimer = null;
