@@ -22,7 +22,7 @@ class RemailConfigTests(unittest.TestCase):
         self.assertTrue(field["secret"])
         self.assertEqual(field["storage"], "env")
 
-    def test_optional_project_and_product_overrides_are_declared(self):
+    def test_optional_project_override_and_suffixes_are_declared(self):
         fields = {item["key"]: item for item in EDITABLE_FIELDS}
         self.assertEqual(fields["REMAIL_SERVICE_MODE"]["type"], "str")
         self.assertEqual(
@@ -33,14 +33,13 @@ class RemailConfigTests(unittest.TestCase):
             ],
         )
         self.assertEqual(fields["REMAIL_PROJECT_ID"]["type"], "int")
-        self.assertEqual(fields["REMAIL_PRODUCT_ID"]["type"], "int")
+        self.assertNotIn("REMAIL_PRODUCT_ID", fields)
         self.assertEqual(fields["REMAIL_EMAIL_SUFFIXES"]["type"], "list_str_multiline")
 
     def test_top_level_config_exports_remail_fields(self):
         self.assertEqual(config.REMAIL_API_KEY, email.REMAIL_API_KEY)
         self.assertEqual(config.REMAIL_SERVICE_MODE, email.REMAIL_SERVICE_MODE)
         self.assertEqual(config.REMAIL_PROJECT_ID, email.REMAIL_PROJECT_ID)
-        self.assertEqual(config.REMAIL_PRODUCT_ID, email.REMAIL_PRODUCT_ID)
         self.assertEqual(config.REMAIL_EMAIL_SUFFIXES, email.REMAIL_EMAIL_SUFFIXES)
 
     def test_webui_places_remail_fields_in_their_own_section(self):

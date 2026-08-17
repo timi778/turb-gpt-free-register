@@ -268,11 +268,11 @@ REMAIL_API_KEY=你的_rk_API_Key
 REMAIL_SERVICE_MODE=code
 ```
 
-服务地址固定为 `https://remail.aishop6.com`，接口说明见 [Remail API 文档](https://remail.aishop6.com/docs)。运行时会自动查询当前 Key 可见的 OpenAI/ChatGPT 项目，优先选择有库存的 Microsoft 邮箱商品，然后按所选模式创建订单并通过取件接口轮询验证码，无需手工填写项目 ID 或商品 ID。
+服务地址固定为 `https://remail.aishop6.com`，接口说明见 [Remail API 文档](https://remail.aishop6.com/docs)。运行时会自动查询当前 Key 可见的 OpenAI/ChatGPT 项目，检查项目公布的邮箱类型、服务模式和库存，然后使用新版统一下单接口创建订单并通过取件接口轮询验证码，无需手工填写项目 ID。
 
-`REMAIL_SERVICE_MODE=code` 为短效接码（一次邮件，默认）；`REMAIL_SERVICE_MODE=purchase` 为长效购买（可重复收件）。客户端会分别检查商品的 `codeEnabled` / `purchaseEnabled`，并使用对应价格排序，只选择支持当前模式的商品。WebUI 的 Remail 子页提供下拉选项，也会自动显示当前消费余额、历史消费、订单数和钱包更新时间，可随时点击“刷新余额”。余额查询只读，不会创建订单。
+`REMAIL_SERVICE_MODE=code` 为短效接码（一次邮件，默认）；`REMAIL_SERVICE_MODE=purchase` 为长效购买（可重复收件）。客户端会分别检查项目商品摘要的 `codeEnabled` / `purchaseEnabled`、价格与库存，只选择支持当前模式的项目；实际邮箱商品由 Remail 统一下单接口按 `serviceMode` 和供给策略分配。WebUI 的 Remail 子页提供下拉选项，也会自动显示当前消费余额、历史消费、订单数和钱包更新时间，可随时点击“刷新余额”。余额查询只读，不会创建订单。
 
-如果平台为你的项目使用了自定义名称，也可以在 WebUI 中填写可选的 `REMAIL_PROJECT_ID` / `REMAIL_PRODUCT_ID`，以跳过自动搜索。
+如果平台为你的项目使用了自定义名称，也可以在 WebUI 中填写可选的 `REMAIL_PROJECT_ID`，以跳过自动搜索。新版 API 不再接收商品 ID，已有环境中的 `REMAIL_PRODUCT_ID` 可以删除。
 
 如需限制邮箱域名，可配置多个 `emailSuffix` 白名单值：
 
@@ -280,7 +280,7 @@ REMAIL_SERVICE_MODE=code
 REMAIL_EMAIL_SUFFIXES=outlook.com,hotmail.com
 ```
 
-WebUI 中可以每行填写一个。每次下单会先检查所选商品公布的 `suffixes` 及库存，只在仍有库存的已配置后缀中等概率随机选择一个，并作为单个 `emailSuffix` 传给 Remail；留空则由平台自动分配后缀。
+WebUI 中可以每行填写一个。每次下单会先检查项目商品摘要公布的 `suffixes` 及库存，只在仍有库存的已配置后缀中等概率随机选择一个，并作为单个 `emailSuffix` 传给 Remail；留空则由平台自动分配后缀。
 
 短效模式按平台规则只用于当前接码订单，行为保持不变。长效模式会把注册邮箱、订单号、`serviceToken` 和平台返回的时间元数据持久化到本地账号记录，并在账号页显示「Remail」状态及「补登」按钮。可多选账号，也可以点击「全选长效」批量补登；补登会按每个账号注册时使用的驱动重新登录、从原长效邮箱收取 OTP，并更新 ChatGPT accessToken 与 Platform OAuth AT/RT。若逐账号自动上传已开启，获取到 RT 后会按完整 Codex 结构同步到 chatgpt2api。
 

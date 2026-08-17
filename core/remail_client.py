@@ -621,13 +621,12 @@ def _product_price(product: dict, service_mode: str | None = None) -> float:
         return 0.0
 
 
-def _product_sort_key(product: dict, service_mode: str | None = None) -> tuple[int, float, int, int]:
+def _product_sort_key(product: dict, service_mode: str | None = None) -> tuple[int, float, int, str]:
     mode = _service_mode(service_mode)
     product_type = str(product.get("type") or "").strip().lower()
     type_priority = {"microsoft": 0, "domain": 1, "random": 2}.get(product_type, 9)
     inventory = _product_inventory(product)
-    product_id = int(product.get("id") or 0)
-    return type_priority, _product_price(product, mode), -(inventory or 0), product_id
+    return type_priority, _product_price(product, mode), -(inventory or 0), product_type
 
 
 def _eligible_products(
@@ -646,11 +645,6 @@ def _eligible_products(
         if str(product.get("status") or "enabled").strip().lower() != "enabled":
             continue
         if product.get(enabled_key) is not True:
-            continue
-        try:
-            if int(product.get("id") or 0) <= 0:
-                continue
-        except (TypeError, ValueError):
             continue
         inventory = _product_inventory(product)
         if inventory is not None and inventory <= 0:
@@ -679,18 +673,15 @@ def _project_detail(project_id: int) -> tuple[dict, list[dict]]:
     raise RemailError(f"Remail 项目详情响应缺少 project/products: project_id={project_id}")
 
 
-def _configured_ids() -> tuple[int, int]:
-    def _as_int(name: str) -> int:
-        raw = getattr(_email_cfg, name, 0)
-        try:
-            value = int(raw or 0)
-        except (TypeError, ValueError) as exc:
-            raise RemailError(f"Remail {name} 必须是非负整数") from exc
-        if value < 0:
-            raise RemailError(f"Remail {name} 必须是非负整数")
-        return value
-
-    return _as_int("REMAIL_PROJECT_ID"), _as_int("REMAIL_PRODUCT_ID")
+def _configured_project_id() -> int:
+    raw = getattr(_email_cfg, "REMAIL_PROJECT_ID", 0)
+    try:
+        value = int(raw or 0)
+    except (TypeError, ValueError) as exc:
+        raise RemailError("Remail REMAIL_PROJECT_ID 必须是非负整数") from exc
+    if value < 0:
+        raise RemailError("Remail REMAIL_PROJECT_ID 必须是非负整数")
+    return value
 
 
 def _selection_from_product(
@@ -710,8 +701,8 @@ def _selection_from_product(
     ignored_suffixes = [suffix for suffix in configured_suffixes if suffix not in matched_suffixes]
     if ignored_suffixes:
         logger.warning(
-            "[Remail] 以下配置后缀在商品 %s 中不可用或无库存，已从随机池排除: %s",
-            product.get("id"),
+            "[Remail] 以下配置后缀在 %s 类型商品中不可用或无库存，已从随机池排除: %s",
+            product.get("type") or "未知",
             ", ".join(ignored_suffixes),
         )
     return RemailSelection(
@@ -732,43 +723,14 @@ def _configured_selection(
     configured_suffixes = (
         _configured_email_suffixes() if configured_suffixes is None else configured_suffixes
     )
-    project_id, product_id = _configured_ids()
-    if not project_id and not product_id:
-        return None
+    project_id = _configured_project_id()
     if not project_id:
-        raise RemailError("已填写 REMAIL_PRODUCT_ID，但 REMAIL_PROJECT_ID 为空")
+        return None
 
     try:
         project, products = _project_detail(project_id)
     except RemailError as exc:
         raise RemailError(f"Remail 配置的项目 ID 无法读取: project_id={project_id}; {exc}") from exc
-
-    if product_id:
-        selected = None
-        for item in products:
-            try:
-                item_id = int(item.get("id") or 0)
-            except (TypeError, ValueError):
-                continue
-            if item_id == product_id:
-                selected = item
-                break
-        if selected is None:
-            raise RemailError(
-                f"Remail 配置的商品不属于该项目: project_id={project_id}, product_id={product_id}"
-            )
-        if not _eligible_products([selected], service_mode=mode):
-            raise RemailError(
-                f"Remail 配置的商品当前不可用于{_service_mode_label(mode)}或无库存: "
-                f"project_id={project_id}, product_id={product_id}"
-            )
-        return _selection_from_product(
-            project_id=project_id,
-            project_name=str(project.get("name") or project_id),
-            product=selected,
-            configured_suffixes=configured_suffixes,
-            service_mode=mode,
-        )
 
     eligible = _eligible_products(products, configured_suffixes, mode)
     if not eligible:
@@ -874,7 +836,7 @@ def _selection(force_refresh: bool = False) -> RemailSelection:
     api_key = _api_key()
     service_mode = _service_mode()
     configured_suffixes = _configured_email_suffixes()
-    if any(_configured_ids()):
+    if _configured_project_id():
         return _configured_selection(
             configured_suffixes, service_mode
         )  # 显式覆盖不走缓存，便于 WebUI 热加载后立即生效。
@@ -902,7 +864,8 @@ def _order_from_payload(payload) -> dict:
 
 def _create_order(selection: RemailSelection) -> dict:
     service_mode = _service_mode(selection.service_mode)
-    body = {"projectId": selection.project_id, "productId": selection.product_id}
+    # 新版统一下单由项目、服务模式和供给策略选择商品，不再接受 productId。
+    body = {"projectId": selection.project_id}
     if selection.email_suffixes:
         email_suffix = random.choice(selection.email_suffixes)
         body["emailSuffix"] = email_suffix
@@ -975,7 +938,7 @@ def pick_account() -> RemailAccount:
                 service_token=token,
                 order_no=order_no,
                 project_id=selection.project_id,
-                product_id=selection.product_id,
+                product_id=int(order.get("productId") or selection.product_id or 0),
                 service_mode=str(order.get("serviceMode") or selection.service_mode or "code"),
                 order_id=order_id,
                 status=str(order.get("status") or ""),
@@ -993,14 +956,13 @@ def pick_account() -> RemailAccount:
                 # 短效模式保持原有进程内逻辑；只有长效购买写入磁盘，供未来补登。
                 _persist_context(account)
             logger.info(
-                "[Remail] 已领取%s邮箱: %s order=%s project=%s(%s) product=%s(%s)",
+                "[Remail] 已领取%s邮箱: %s order=%s project=%s(%s) product_type=%s",
                 _service_mode_label(selection.service_mode),
                 email,
                 order_no,
                 selection.project_name,
                 selection.project_id,
                 selection.product_type,
-                selection.product_id,
             )
             return account
         except RemailError as exc:

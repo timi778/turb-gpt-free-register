@@ -18,15 +18,12 @@ class RemailClientTests(unittest.TestCase):
         remail_client._CONTEXT_CACHE.clear()
         remail_client._SELECTION_CACHE.clear()
         project_patch = patch.object(remail_client._email_cfg, "REMAIL_PROJECT_ID", 0, create=True)
-        product_patch = patch.object(remail_client._email_cfg, "REMAIL_PRODUCT_ID", 0, create=True)
         suffixes_patch = patch.object(remail_client._email_cfg, "REMAIL_EMAIL_SUFFIXES", [], create=True)
         mode_patch = patch.object(remail_client._email_cfg, "REMAIL_SERVICE_MODE", "code", create=True)
         project_patch.start()
-        product_patch.start()
         suffixes_patch.start()
         mode_patch.start()
         self.addCleanup(project_patch.stop)
-        self.addCleanup(product_patch.stop)
         self.addCleanup(suffixes_patch.stop)
         self.addCleanup(mode_patch.stop)
 
@@ -223,7 +220,7 @@ class RemailClientTests(unittest.TestCase):
         self.assertEqual(first_key, second_key)
         self.assertEqual(
             request.call_args_list[0].kwargs["json"],
-            {"projectId": 1001, "productId": 2001, "emailSuffix": "outlook.com"},
+            {"projectId": 1001, "emailSuffix": "outlook.com"},
         )
         self.assertEqual(request.call_args_list[0].kwargs["json"], request.call_args_list[1].kwargs["json"])
         choice.assert_called_once_with(("outlook.com", "hotmail.com"))
@@ -254,12 +251,11 @@ class RemailClientTests(unittest.TestCase):
         self.assertTrue(all(call.args[1].endswith("/v1/open/projects") for call in request.call_args_list))
 
     @patch("core.remail_client.requests.request")
-    def test_explicit_project_and_product_override_skips_project_search(self, request):
+    def test_explicit_project_override_skips_project_search(self, request):
         request.side_effect = [
             _response({
                 "project": {"id": 1001, "name": "Custom project"},
                 "products": [{
-                    "id": 2001,
                     "type": "domain",
                     "status": "enabled",
                     "codeEnabled": True,
@@ -276,7 +272,7 @@ class RemailClientTests(unittest.TestCase):
 
         with patch.object(remail_client._email_cfg, "REMAIL_API_KEY", "rk-test", create=True), patch.object(
             remail_client._email_cfg, "REMAIL_PROJECT_ID", 1001, create=True
-        ), patch.object(remail_client._email_cfg, "REMAIL_PRODUCT_ID", 2001, create=True):
+        ):
             account = remail_client.pick_account()
 
         self.assertEqual(account.email, "custom@domain.test")
@@ -288,7 +284,6 @@ class RemailClientTests(unittest.TestCase):
             _response({
                 "project": {"id": 1001, "name": "ChatGPT"},
                 "products": [{
-                    "id": 2001,
                     "type": "microsoft",
                     "status": "enabled",
                     "codeEnabled": True,
@@ -310,7 +305,7 @@ class RemailClientTests(unittest.TestCase):
 
         with patch.object(remail_client._email_cfg, "REMAIL_API_KEY", "rk-test", create=True), patch.object(
             remail_client._email_cfg, "REMAIL_PROJECT_ID", 1001, create=True
-        ), patch.object(remail_client._email_cfg, "REMAIL_PRODUCT_ID", 2001, create=True), patch.object(
+        ), patch.object(
             remail_client._email_cfg,
             "REMAIL_EMAIL_SUFFIXES",
             ["outlook.com", "hotmail.com", "outlook.fr"],
@@ -322,15 +317,14 @@ class RemailClientTests(unittest.TestCase):
         choice.assert_called_once_with(("outlook.com", "outlook.fr"))
         self.assertEqual(
             request.call_args_list[1].kwargs["json"],
-            {"projectId": 1001, "productId": 2001, "emailSuffix": "outlook.fr"},
+            {"projectId": 1001, "emailSuffix": "outlook.fr"},
         )
 
     @patch("core.remail_client.requests.request")
-    def test_configured_product_rejects_unsupported_suffixes_before_order(self, request):
+    def test_configured_project_rejects_unsupported_suffixes_before_order(self, request):
         request.return_value = _response({
             "project": {"id": 1001, "name": "ChatGPT"},
             "products": [{
-                "id": 2001,
                 "type": "microsoft",
                 "status": "enabled",
                 "codeEnabled": True,
@@ -343,7 +337,7 @@ class RemailClientTests(unittest.TestCase):
 
         with patch.object(remail_client._email_cfg, "REMAIL_API_KEY", "rk-test", create=True), patch.object(
             remail_client._email_cfg, "REMAIL_PROJECT_ID", 1001, create=True
-        ), patch.object(remail_client._email_cfg, "REMAIL_PRODUCT_ID", 2001, create=True), patch.object(
+        ), patch.object(
             remail_client._email_cfg, "REMAIL_EMAIL_SUFFIXES", ["outlook.com"], create=True
         ):
             with self.assertRaisesRegex(remail_client.RemailError, "emailSuffix"):
@@ -368,7 +362,6 @@ class RemailClientTests(unittest.TestCase):
             _response({
                 "project": {"id": 1001, "name": "OpenAI 验证码", "targetPlatform": "OpenAI"},
                 "products": [{
-                    "id": 2001,
                     "type": "microsoft",
                     "status": "enabled",
                     "codeEnabled": True,
@@ -398,7 +391,8 @@ class RemailClientTests(unittest.TestCase):
         self.assertEqual(detail_call.args, ("GET", "https://remail.aishop6.com/v1/open/projects/1001"))
         self.assertEqual(order_call.args, ("POST", "https://remail.aishop6.com/v1/open/orders"))
         self.assertEqual(order_call.kwargs["params"], {"serviceMode": "code", "supply": "private_first"})
-        self.assertEqual(order_call.kwargs["json"], {"projectId": 1001, "productId": 2001})
+        self.assertEqual(order_call.kwargs["json"], {"projectId": 1001})
+        self.assertEqual(account.product_id, 0)
         self.assertTrue(order_call.kwargs["headers"]["Idempotency-Key"].startswith("turb-gpt-remail-"))
 
     @patch("core.remail_client.requests.request")

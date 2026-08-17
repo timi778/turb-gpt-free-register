@@ -456,12 +456,8 @@ EDITABLE_FIELDS = [
         "label": "Remail 项目 ID（可选）", "help": "默认 0 自动搜索；平台项目名称不含 OpenAI/ChatGPT 时可填写",
     },
     {
-        "key": "REMAIL_PRODUCT_ID", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
-        "label": "Remail 商品 ID（可选）", "help": "默认 0 自动选择有库存的接码商品；填写后与项目 ID 配合使用",
-    },
-    {
         "key": "REMAIL_EMAIL_SUFFIXES", "file": "email.py", "type": "list_str_multiline", "group": "邮箱 / OTP",
-        "label": "Remail emailSuffix 白名单", "help": "可选，每行一个邮箱后缀，例如 outlook.com、hotmail.com；每次下单只从商品有库存的已配置后缀中随机选择一个",
+        "label": "Remail emailSuffix 白名单", "help": "可选，每行一个邮箱后缀，例如 outlook.com、hotmail.com；每次下单只从项目有库存的已配置后缀中随机选择一个",
     },
     {
         "key": "CLOUDMAIL_API_BASE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
