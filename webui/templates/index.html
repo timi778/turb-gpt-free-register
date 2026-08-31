@@ -422,7 +422,7 @@
         <div class="row">
           <div>
             <label class="fld">注册数量
-              <input id="regCount" type="number" min="1" max="200" value="1">
+              <input id="regCount" type="number" min="1" max="200" value="10">
             </label>
           </div>
           <div style="flex:2;min-width:240px;">
@@ -433,7 +433,7 @@
           </div>
           <div>
             <label class="fld">并发线程数
-              <input id="regWorkers" type="number" min="1" max="16" value="3">
+              <input id="regWorkers" type="number" min="1" max="16" value="1">
             </label>
           </div>
           <div class="action-cell">
@@ -849,8 +849,8 @@ $('#regGroup').addEventListener('input', (e) => {
   e.target.dataset.customName = e.target.value.trim() ? '1' : '0';
 });
 $('#btnStart').addEventListener('click', async () => {
-  const count = parseInt($('#regCount').value || '1', 10);
-  const workers = parseInt($('#regWorkers').value || '3', 10);
+  const count = parseInt($('#regCount').value || '10', 10);
+  const workers = parseInt($('#regWorkers').value || '1', 10);
   const groupInput = $('#regGroup');
   if (groupInput.dataset.customName !== '1' || !groupInput.value.trim()) {
     groupInput.value = currentMinuteGroupName();

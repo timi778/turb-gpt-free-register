@@ -1910,7 +1910,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         """启动批量注册：body {count, workers, group_name?}。"""
         data = request.get_json(silent=True) or {}
         try:
-            count = int(data.get("count", 1))
+            count = int(data.get("count", 10))
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "count 非法"}), 400
         if count < 1 or count > 200:
@@ -1918,7 +1918,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
         # workers 控制本次新提交任务使用的线程池；若和上次不同，服务层会为新任务切换到新池。
         try:
-            workers = max(1, min(16, int(data.get("workers", 3))))
+            workers = max(1, min(16, int(data.get("workers", 1))))
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "workers 非法"}), 400
 
