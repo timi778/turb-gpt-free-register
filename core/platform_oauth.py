@@ -347,11 +347,11 @@ def _complete_platform_authorization_in_selenium(
     otp_provider=None,
     browser_helpers=None,
 ) -> str:
-    """在同一浏览器完成 Platform OAuth 的邮箱 OTP 回退流程。
+    """在同一浏览器完成 Platform OAuth 的邮箱 OTP 流程。
 
-    Platform OAuth 通常可由导入 Cookie 的 HTTP 会话直接完成。服务端要求
-    ``max_age=0`` 重认证时，HTTP 请求会停在邮箱验证页而没有 callback code；
-    此时必须回到原 Roxy 会话处理页面，避免另开浏览器后丢失设备指纹和 Cookie。
+    必须由浏览器完成授权页导航，因为服务端要求 ``max_age=0`` 时会在该导航
+    过程中发送邮箱 OTP。HTTP 会话只负责后续 token 兑换，避免同一个授权地址
+    先被 HTTP 请求、再被浏览器请求而连续触发两封验证码。
     """
     if otp_provider is None:
         from core.email_provider import wait_for_otp
@@ -367,7 +367,8 @@ def _complete_platform_authorization_in_selenium(
                 driver,
                 authorization.url,
                 timeout=45,
-                attempts=2,
+                # 授权 GET 可能触发邮箱 OTP；重试同一个 URL 会让上一封验证码失效。
+                attempts=1,
                 accept_hosts=("auth.openai.com", "platform.openai.com"),
             )
         else:
@@ -464,7 +465,11 @@ def get_platform_oauth_tokens_selenium(
     *,
     otp_provider=None,
 ) -> dict:
-    """导入 Selenium 登录态后完成 OAuth；重认证时回到同一浏览器处理邮箱 OTP。"""
+    """用原 Selenium 浏览器完成一次授权，再用 HTTP 会话兑换 token。
+
+    不能先用 HTTP GET 探测授权结果再回退浏览器：带 ``max_age=0`` 的授权 GET
+    本身就可能发送 OTP，随后浏览器 GET 会再次发送并使第一封验证码失效。
+    """
     from core.session import BrowserSession
 
     http_session = BrowserSession(proxy=proxy)
@@ -473,35 +478,18 @@ def get_platform_oauth_tokens_selenium(
     _ensure_http_oai_did(http_session, http_session.device_id)
     logger.debug("[Platform OAuth] Selenium Cookie 已导入 HTTP 会话: count=%s", copied)
     authorization = build_platform_authorization(email, http_session.device_id)
-    response = http_session.get(
-        authorization.url,
-        headers=_authorize_headers(http_session),
-        allow_redirects=True,
+
+    # 授权页只走一次，OTP 也只由这次浏览器导航触发一次。
+    code = _complete_platform_authorization_in_selenium(
+        driver,
+        authorization,
+        email,
+        otp_provider=otp_provider,
     )
-    body = "" if "code=" in _response_url(response) else _response_text(response)
-    try:
-        code = extract_authorization_code(
-            _response_url(response),
-            expected_state=authorization.state,
-            response_body=body,
-        )
-    except Exception as exc:
-        if not _is_missing_authorization_code_error(exc):
-            raise
-        logger.info(
-            "[Platform OAuth] HTTP 授权未返回 callback code，回退同一浏览器处理重新认证: email=%s",
-            email,
-        )
-        code = _complete_platform_authorization_in_selenium(
-            driver,
-            authorization,
-            email,
-            otp_provider=otp_provider,
-        )
-        # 邮箱验证会轮换或新增 auth Cookie，回写 HTTP 会话后再换 token。
-        copied = _copy_selenium_cookies(driver, http_session)
-        _ensure_http_oai_did(http_session, authorization.device_id)
-        logger.debug("[Platform OAuth] OTP 后重新导入 Selenium Cookie: count=%s", copied)
+    # 授权完成后可能轮换 auth Cookie，回写 HTTP 会话后再换 token。
+    copied = _copy_selenium_cookies(driver, http_session)
+    _ensure_http_oai_did(http_session, authorization.device_id)
+    logger.debug("[Platform OAuth] OTP 后重新导入 Selenium Cookie: count=%s", copied)
 
     token_response = http_session.post(
         PLATFORM_TOKEN_URL,

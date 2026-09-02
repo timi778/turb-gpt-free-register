@@ -98,12 +98,6 @@ class _SeleniumHttpSession(_Session):
         self.__class__.instances.append(self)
 
 
-class _SeleniumReauthHttpSession(_SeleniumHttpSession):
-    def get(self, url, **kwargs):
-        self.get_calls.append((url, kwargs))
-        return _Response(url="https://auth.openai.com/email-verification")
-
-
 class _SeleniumDriver:
     def __init__(self):
         self.cdp_calls = []
@@ -241,8 +235,9 @@ class PlatformOAuthTests(unittest.TestCase):
         self.assertEqual(len(context.request.post_calls), 1)
         self.assertTrue(any(cookie["name"] == "oai-did" for cookie in context.added_cookies))
 
+    @patch("core.platform_oauth._complete_platform_authorization_in_selenium", return_value="browser-code")
     @patch("core.session.BrowserSession", _SeleniumHttpSession)
-    def test_selenium_path_copies_cookies_and_uses_one_http_session(self):
+    def test_selenium_path_authorizes_in_browser_once_then_uses_http_token_exchange(self, complete):
         from core.platform_oauth import get_platform_oauth_tokens_selenium
 
         _SeleniumHttpSession.instances.clear()
@@ -252,39 +247,19 @@ class PlatformOAuthTests(unittest.TestCase):
         )
 
         self.assertEqual(tokens["refresh_token"], "platform-rt")
+        complete.assert_called_once()
         self.assertEqual(len(_SeleniumHttpSession.instances), 1)
         http = _SeleniumHttpSession.instances[0]
         self.assertEqual(http.proxy, "http://proxy.example:8080")
-        self.assertEqual(len(http.get_calls), 1)
+        # 授权 GET 只能由 Selenium 浏览器执行一次，HTTP 会话只负责 token 兑换。
+        self.assertEqual(len(http.get_calls), 0)
         self.assertEqual(len(http.post_calls), 1)
         cookie_names = [item[0] for item in http.session.cookies.values]
         self.assertIn("session-token", cookie_names)
         self.assertIn("oai-did", cookie_names)
         self.assertEqual(driver.cdp_calls[0][0], "Storage.getCookies")
-
-    @patch("core.platform_oauth._complete_platform_authorization_in_selenium")
-    @patch("core.session.BrowserSession", _SeleniumReauthHttpSession)
-    def test_selenium_path_uses_browser_otp_fallback_when_http_auth_needs_reauth(self, complete):
-        from core.platform_oauth import get_platform_oauth_tokens_selenium
-
-        _SeleniumReauthHttpSession.instances.clear()
-        driver = _SeleniumDriver()
-
-        def callback(_driver, authorization, _email, **_kwargs):
-            self.assertTrue(authorization.state)
-            return "otp-code"
-
-        complete.side_effect = callback
-        tokens = get_platform_oauth_tokens_selenium(driver, "user@example.com")
-
-        self.assertEqual(tokens["refresh_token"], "platform-rt")
-        complete.assert_called_once()
-        self.assertEqual(len(_SeleniumReauthHttpSession.instances), 1)
-        # 初始设备 ID + 初始 Cookie 导入 + OTP 后 Cookie 重导入。
-        self.assertEqual(len(driver.cdp_calls), 3)
-        http = _SeleniumReauthHttpSession.instances[0]
         body = parse_qs(http.post_calls[0][1]["data"])
-        self.assertEqual(body["code"], ["otp-code"])
+        self.assertEqual(body["code"], ["browser-code"])
 
     def test_browser_otp_fallback_uses_shared_email_provider(self):
         from core.platform_oauth import (
@@ -297,12 +272,21 @@ class PlatformOAuthTests(unittest.TestCase):
         class Driver:
             current_url = ""
 
+            def __init__(self):
+                self.get_calls = 0
+
             def get(self, _url):
+                self.get_calls += 1
                 self.current_url = "https://auth.openai.com/email-verification"
 
         driver = Driver()
 
         class BrowserHelpers:
+            @staticmethod
+            def _safe_get(driver, url, **kwargs):
+                self.assertEqual(kwargs["attempts"], 1)
+                driver.get(url)
+
             @staticmethod
             def _is_email_verification_page(_driver):
                 return True
@@ -340,6 +324,7 @@ class PlatformOAuthTests(unittest.TestCase):
             )
 
         self.assertEqual(code, "otp-code")
+        self.assertEqual(driver.get_calls, 1)
         self.assertEqual(wait_otp.call_args.args[0], "user@example.com")
         self.assertIn("after_ts", wait_otp.call_args.kwargs)
 
